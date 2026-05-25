@@ -1,0 +1,16 @@
+{
+  "name": "vimbrowser-cli",
+  "bin": "./bin/vimbrowser-cli",
+  "systemHint": "You can control the user's vimbrowser browser through the `vimbrowser-cli` CLI tool (source at ~/Workspace/exocortex/external-tools/vimbrowser-cli). Run `vimbrowser-cli -h` for usage reference.",
+  "display": {
+    "label": "Vimbrowser",
+    "color": "#48c9e3"
+  },
+  "shell": {
+    "literalArgs": [
+      { "subcommand": "js", "kind": "tail" },
+      { "subcommand": "raw", "kind": "tail" }
+    ]
+  }
+}
+

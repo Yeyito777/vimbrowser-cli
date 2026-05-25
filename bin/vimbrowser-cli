@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# vimbrowser-cli — control vimbrowser through its native Unix IPC socket.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+if [[ -x "$PROJECT_DIR/.venv/bin/python3" ]]; then
+    PYTHON="$PROJECT_DIR/.venv/bin/python3"
+else
+    PYTHON="${PYTHON:-python3}"
+fi
+
+export PYTHONPATH="$PROJECT_DIR"
+
+usage() {
+    cat <<'EOF'
+usage: vimbrowser-cli <command> [args]
+
+commands:
+  status       Show active browser/tab state as JSON
+  protocol     Show IPC protocol metadata
+  version      Alias for protocol
+  commands     Show machine-readable IPC command metadata
+  browser-help Show vimbrowser's raw IPC help text
+  tabs         List tabs in tab-stack order (--json for raw JSON)
+  current-tab  Show the active tab (--id-only for just the tab ID)
+  focus        Focus a tab by stable tab ID
+  tab-order    Move a tab to a zero-based tab-stack index
+  open         Open a URL/search/local path in a new active tab
+  load         Load a URL/search/local path into an existing tab
+  close-tab    Close the active tab or a tab by stable ID
+  reload       Reload the active tab or a tab by stable ID
+  reload-ignore-cache  Hard-reload the active tab or a tab by stable ID
+  back         Navigate back in the active tab or a tab by stable ID
+  forward      Navigate forward in the active tab or a tab by stable ID
+  stop         Stop loading in the active tab or a tab by stable ID
+  zoom         Zoom a tab in/out/reset/to CEF numeric level
+  scroll       Scroll the active page by pixels
+  scroll-tab   Scroll a tab by stable ID
+  url          Print the active tab URL
+  fps          Print active-tab FPS sample
+  refresh      Print active-browser refresh rate
+  js           Evaluate JavaScript in a tab
+  js-file      Evaluate a local JavaScript file in a tab
+  html         Dump current full document HTML for a tab
+  text         Dump current document text for a tab
+  screenshot   Capture a tab screenshot as PNG
+  shader       Toggle or set the native page shader
+  showfps      Toggle or set the FPS overlay
+  network      Pass through network debugging IPC commands
+  cookies      List cookies visible to a tab
+  cookie-delete Delete a cookie by name for a tab URL
+  cookie-set   Set a cookie for a tab URL
+  raw          Send a raw vimbrowser IPC command line
+
+Socket resolution:
+  --socket PATH             Use a specific IPC socket for this command
+  --profile-dir DIR         Use DIR/ipc.sock for this command
+  VIMBROWSER_IPC=PATH       Environment override
+  VIMBROWSER_PROFILE_DIR=DIR  Environment profile shortcut
+  default                   ~/.runtime/vimbrowser-yeyito/ipc.sock, then state dirs
+
+Tab resolution:
+  tabid       Stable numeric vimbrowser tab ID
+  @active     Active tab (default where a tab is optional)
+  @first      First tab in the stack
+  @last       Last tab in the stack
+
+Run 'vimbrowser-cli <command> --help' for command-specific usage.
+EOF
+}
+
+if [[ $# -eq 0 ]]; then
+    usage
+    exit 1
+fi
+
+cmd="$1"; shift
+
+case "$cmd" in
+    status|protocol|version|commands|browser-help|tabs|current-tab|focus|tab-order|open|load|close-tab|reload|reload-ignore-cache|back|forward|stop|zoom|scroll|scroll-tab|url|fps|refresh|js|js-file|html|text|screenshot|shader|showfps|network|cookies|cookie-delete|cookie-set|raw)
+        pyfn="cmd_${cmd//-/_}"
+        exec "$PYTHON" -c "import sys; from src.commands import $pyfn; $pyfn(sys.argv[1:])" "$@" ;;
+    help|--help|-h)
+        usage ;;
+    *)
+        echo "vimbrowser-cli: unknown command '$cmd'" >&2
+        echo "Run 'vimbrowser-cli --help' for usage." >&2
+        exit 1 ;;
+esac

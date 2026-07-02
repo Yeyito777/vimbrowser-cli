@@ -24,7 +24,7 @@ commands:
   browser-help Show vimbrowser's raw IPC help text
   tabs         List tabs in tab-stack order (--json for raw JSON)
   current-tab  Show the active tab (--id-only for just the tab ID)
-  focus        Focus a tab by stable tab ID
+  focus        Focus a tab; not needed for AI use unless user explicitly asks
   tab-order    Move a tab to a zero-based tab-stack index
   open         Open a URL/search/local path in a new active tab
   load         Load a URL/search/local path into an existing tab

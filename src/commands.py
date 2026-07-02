@@ -190,7 +190,7 @@ def cmd_current_tab(argv: list[str]) -> None:
 
 def cmd_focus(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog=f"{PROG} focus", parents=[_parent()],
-                                description="Focus a tab by stable tab ID")
+                                description="Focus a tab; not needed for AI use unless user explicitly asks")
     p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
     p.add_argument("--pretty", action="store_true", help="Pretty-print returned status JSON")
     args = p.parse_args(argv)

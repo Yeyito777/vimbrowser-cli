@@ -474,8 +474,32 @@ def cmd_network(argv: list[str]) -> None:
 
 
 def cmd_cookies(argv: list[str]) -> None:
-    _single_optional_tab_command(argv, name="cookies", ipc_name="cookies",
-                                 description="List cookies visible to a tab URL")
+    p = argparse.ArgumentParser(prog=f"{PROG} cookies", parents=[_parent()],
+                                description="List cookies visible to a tab URL or explicit URL")
+    p.add_argument("parts", nargs="*",
+                   help="[tabid|@active|@first|@last] [url]")
+    p.add_argument("--url", help="Atomically list profile cookies visible to this URL without requiring a tab")
+    args = p.parse_args(argv)
+
+    tab_spec = None
+    url = args.url
+    parts = list(args.parts)
+    if parts and _looks_like_tab_spec(parts[0]):
+        tab_spec = parts.pop(0)
+
+    if parts:
+        if url is not None:
+            p.error("unexpected positional URL when --url is already set")
+        url = " ".join(parts)
+
+    if url and tab_spec is None:
+        print(_send(args, f"cookies-url {url}"), end="")
+        return
+
+    command = f"cookies {_resolve_tab(args, tab_spec or '@active')}"
+    if url:
+        command += f" {url}"
+    print(_send(args, command), end="")
 
 
 def cmd_cookie_delete(argv: list[str]) -> None:

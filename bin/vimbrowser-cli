@@ -48,7 +48,7 @@ commands:
   shader       Toggle or set the native page shader
   showfps      Toggle or set the FPS overlay
   network      Pass through network debugging IPC commands
-  cookies      List cookies visible to a tab
+  cookies      List cookies visible to a tab or atomically for a URL
   cookie-delete Delete a cookie by name for a tab URL
   cookie-set   Set a cookie for a tab URL
   raw          Send a raw vimbrowser IPC command line

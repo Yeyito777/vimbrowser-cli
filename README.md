@@ -60,11 +60,15 @@ vimbrowser-cli screenshot @active -o /tmp/tab.png
 vimbrowser-cli shader on
 vimbrowser-cli showfps off
 vimbrowser-cli cookies @active
+vimbrowser-cli cookies --url https://www.google.com/
 vimbrowser-cli cookie-delete @active session
 vimbrowser-cli cookie-set @active debug true
 vimbrowser-cli network @active list
 vimbrowser-cli raw status
 ```
+
+`vimbrowser-cli cookies --url URL` uses the browser's profile-level
+`cookies-url` IPC command and does not require a matching tab to exist.
 
 Tab arguments accept stable vimbrowser tab IDs plus these convenience aliases:
 

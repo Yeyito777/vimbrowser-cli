@@ -27,6 +27,7 @@ commands:
   focus        Focus a tab; not needed for AI use unless user explicitly asks
   tab-order    Move a tab to a zero-based tab-stack index
   open         Open a URL/search/local path in a new active tab
+  open-context Open a URL in a named, isolated persistent browser context
   load         Load a URL/search/local path into an existing tab
   close-tab    Close the active tab or a tab by stable ID
   reload       Reload the active tab or a tab by stable ID
@@ -78,7 +79,7 @@ fi
 cmd="$1"; shift
 
 case "$cmd" in
-    status|protocol|version|commands|browser-help|tabs|current-tab|focus|tab-order|open|load|close-tab|reload|reload-ignore-cache|back|forward|stop|zoom|scroll|scroll-tab|url|fps|refresh|js|js-file|html|text|screenshot|shader|showfps|network|cookies|cookie-delete|cookie-set|raw)
+    status|protocol|version|commands|browser-help|tabs|current-tab|focus|tab-order|open|open-context|load|close-tab|reload|reload-ignore-cache|back|forward|stop|zoom|scroll|scroll-tab|url|fps|refresh|js|js-file|html|text|screenshot|shader|showfps|network|cookies|cookie-delete|cookie-set|raw)
         pyfn="cmd_${cmd//-/_}"
         exec "$PYTHON" -c "import sys; from src.commands import $pyfn; $pyfn(sys.argv[1:])" "$@" ;;
     help|--help|-h)

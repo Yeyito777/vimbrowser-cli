@@ -223,6 +223,23 @@ def cmd_open(argv: list[str]) -> None:
     print(_send(args, f"open-tab {target}"), end="")
 
 
+def cmd_open_context(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} open-context",
+        parents=[_parent()],
+        description=(
+            "Open a URL/search/local path in a named persistent browser context. "
+            "Cookies and site storage are isolated from normal tabs and other contexts."
+        ),
+    )
+    p.add_argument("context", help="Context name (lowercase letters, numbers, '_', and '-')")
+    p.add_argument("target", nargs=argparse.REMAINDER,
+                   help="URL, search query, or local path")
+    args = p.parse_args(argv)
+    target = _joined_tail(args.target, "target", p)
+    print(_send(args, f"open-context-tab {args.context} {target}"), end="")
+
+
 def cmd_load(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog=f"{PROG} load", parents=[_parent()],
                                 description="Load a URL/search/local path into an existing tab")

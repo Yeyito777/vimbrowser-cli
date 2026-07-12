@@ -41,6 +41,7 @@ vimbrowser-cli current-tab --id-only
 vimbrowser-cli focus 3
 vimbrowser-cli tab-order @active 0
 vimbrowser-cli open https://example.com
+vimbrowser-cli open-context discord-paramount https://discord.com/login
 vimbrowser-cli load @active https://example.com
 vimbrowser-cli close-tab @last
 vimbrowser-cli reload @active
@@ -77,6 +78,11 @@ Tab arguments accept stable vimbrowser tab IDs plus these convenience aliases:
 - `@last`
 
 `js` and `raw` are declared in `manifest.json` as literal-tail commands so Exocortex's bash harness can pass JavaScript/raw IPC text without manual shell escaping.
+
+`open-context NAME TARGET` creates a tab backed by a named persistent CEF request
+context. Its cookies and site storage are isolated from ordinary tabs and from
+other named contexts. This requires a vimbrowser build that advertises the
+`open-context-tab` IPC command.
 
 ## Validation
 

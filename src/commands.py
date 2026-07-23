@@ -5,13 +5,20 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
 
 from src import ipc
 
 PROG = "vimbrowser-cli"
+UPLOAD_PAYLOAD_VERSION = 1
+MAX_UPLOAD_FILES = 32
+MAX_UPLOAD_SELECTOR_BYTES = 4096
+MAX_UPLOAD_PATH_BYTES = 4096
+MAX_UPLOAD_PAYLOAD_BYTES = 256 * 1024
 
 
 def _parent() -> argparse.ArgumentParser:
@@ -37,14 +44,15 @@ def _send(args, command: str) -> str:
         ipc.die(str(exc))
 
 
-def _json_response(args, command: str) -> dict:
+def _json_response(args, command: str, *, label: str | None = None) -> dict:
     response = _send(args, command)
+    response_label = label or command
     try:
         value = json.loads(response)
     except json.JSONDecodeError as exc:
-        ipc.die(f"invalid JSON response for {command!r}: {exc}\n{response[:4096]}")
+        ipc.die(f"invalid JSON response for {response_label!r}: {exc}\n{response[:4096]}")
     if not isinstance(value, dict):
-        ipc.die(f"unexpected non-object JSON response for {command!r}")
+        ipc.die(f"unexpected non-object JSON response for {response_label!r}")
     return value
 
 
@@ -105,6 +113,94 @@ def _joined_tail(parts: list[str], what: str, parser: argparse.ArgumentParser) -
     if not parts:
         parser.error(f"missing {what}")
     return " ".join(parts)
+
+
+def _upload_error(code: str, message: str, *, exit_code: int = 2,
+                  **details) -> None:
+    """Print a structured upload error without echoing any local path."""
+    error = {"code": code, "message": message}
+    error.update(details)
+    _print_json({"ok": False, "error": error})
+    raise SystemExit(exit_code)
+
+
+def _parse_upload_target(value: str) -> dict:
+    """Return the versioned IPC target object for a CLI target expression."""
+    if value == "chooser":
+        return {"kind": "chooser"}
+    if value.startswith("activate:"):
+        selector = value.removeprefix("activate:")
+        if not selector:
+            raise ValueError("activation CSS selector target must not be empty")
+        if len(selector.encode("utf-8")) > MAX_UPLOAD_SELECTOR_BYTES:
+            raise ValueError("activation CSS selector target is too long")
+        return {"kind": "activate", "value": selector}
+    if value.startswith("index:"):
+        index_text = value.removeprefix("index:")
+        if not index_text.isdecimal():
+            raise ValueError("index target must be a non-negative decimal integer")
+        index = int(index_text)
+        if index > 10000:
+            raise ValueError("index target exceeds the supported limit")
+        return {"kind": "index", "value": index}
+
+    selector = value.removeprefix("css:") if value.startswith("css:") else value
+    if not selector:
+        raise ValueError("CSS selector target must not be empty")
+    if len(selector.encode("utf-8")) > MAX_UPLOAD_SELECTOR_BYTES:
+        raise ValueError("CSS selector target is too long")
+    return {"kind": "css", "value": selector}
+
+
+def _validated_upload_paths(values: list[str]) -> list[str]:
+    """Validate and canonicalize explicit local upload paths.
+
+    The browser repeats these checks in its own process. Keeping the CLI check
+    makes obvious caller mistakes fail before any IPC mutation is attempted.
+    """
+    if not values:
+        raise ValueError("at least one file path is required")
+    if len(values) > MAX_UPLOAD_FILES:
+        raise ValueError(f"at most {MAX_UPLOAD_FILES} files may be assigned at once")
+
+    paths: list[str] = []
+    for index, value in enumerate(values):
+        path = Path(value)
+        if not path.is_absolute():
+            raise ValueError(f"file path {index + 1} must be absolute")
+        if len(os.fsencode(value)) > MAX_UPLOAD_PATH_BYTES:
+            raise ValueError(f"file path {index + 1} is too long")
+        try:
+            info = path.stat()
+            canonical = path.resolve(strict=True)
+        except (FileNotFoundError, NotADirectoryError):
+            raise ValueError(f"file path {index + 1} does not exist") from None
+        except OSError as exc:
+            raise ValueError(
+                f"file path {index + 1} could not be inspected: {exc.strerror or 'OS error'}"
+            ) from None
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"file path {index + 1} is not a regular file")
+        if not os.access(canonical, os.R_OK):
+            raise ValueError(f"file path {index + 1} is not readable")
+        canonical_text = str(canonical)
+        if len(os.fsencode(canonical_text)) > MAX_UPLOAD_PATH_BYTES:
+            raise ValueError(f"canonical file path {index + 1} is too long")
+        paths.append(canonical_text)
+    return paths
+
+
+def _upload_ipc_command(tabid: str, target: dict, paths: list[str]) -> str:
+    """Encode a whitespace-safe v1 payload for the stable raw IPC command."""
+    payload = json.dumps(
+        {"version": UPLOAD_PAYLOAD_VERSION, "target": target, "paths": paths},
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    if len(payload) > MAX_UPLOAD_PAYLOAD_BYTES:
+        raise ValueError("encoded upload request is too large")
+    token = base64.b64encode(payload).decode("ascii")
+    return f"upload-file {tabid} {token}"
 
 
 # ─── State and tabs ─────────────────────────────────────────────
@@ -451,6 +547,85 @@ def cmd_screenshot(argv: list[str]) -> None:
         return
 
     sys.stdout.buffer.write(image)
+
+
+def cmd_upload_file(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} upload-file",
+        parents=[_parent()],
+        description=(
+            "Assign approved local files to one unambiguous page <input type=file>, "
+            "or atomically activate a chooser control through the browser process"
+        ),
+        epilog=(
+            "TARGET is a CSS selector (optionally prefixed css:) and must match "
+            "exactly one element, or index:N for the explicit zero-based Nth "
+            "input[type=file] in the main document. Use activate:SELECTOR to "
+            "atomically native-activate one visible chooser control and supply "
+            "the picker it opens. Use chooser to arm the next native open-file "
+            "chooser from the tab for 60 seconds."
+        ),
+    )
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("target",
+                   help=("Unique CSS selector, css:SELECTOR, index:N, "
+                         "activate:SELECTOR, or chooser"))
+    p.add_argument("paths", nargs="+", metavar="ABSOLUTE_PATH",
+                   help="Absolute existing regular file path(s)")
+    p.add_argument("--pretty", action="store_true", help="Pretty-print response JSON")
+    args = p.parse_args(argv)
+
+    try:
+        target = _parse_upload_target(args.target)
+    except ValueError as exc:
+        _upload_error("invalid_target", str(exc))
+    try:
+        paths = _validated_upload_paths(args.paths)
+    except ValueError as exc:
+        _upload_error("invalid_path", str(exc))
+
+    tabid = _resolve_tab(args, args.tab)
+    try:
+        command = _upload_ipc_command(tabid, target, paths)
+    except ValueError as exc:
+        _upload_error("request_too_large", str(exc))
+
+    payload = _json_response(args, command, label="upload-file")
+    _print_json(payload, pretty=args.pretty)
+    if payload.get("ok") is not True:
+        raise SystemExit(1)
+
+
+def _upload_file_state_command(argv: list[str], *, name: str,
+                               ipc_name: str, description: str) -> None:
+    p = argparse.ArgumentParser(prog=f"{PROG} {name}", parents=[_parent()],
+                                description=description)
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("--pretty", action="store_true", help="Pretty-print response JSON")
+    args = p.parse_args(argv)
+    tabid = _resolve_tab(args, args.tab)
+    payload = _json_response(args, f"{ipc_name} {tabid}", label=ipc_name)
+    _print_json(payload, pretty=args.pretty)
+    if payload.get("ok") is not True:
+        raise SystemExit(1)
+
+
+def cmd_upload_file_status(argv: list[str]) -> None:
+    _upload_file_state_command(
+        argv,
+        name="upload-file-status",
+        ipc_name="upload-file-status",
+        description="Show the state of a chooser-target upload for a tab",
+    )
+
+
+def cmd_upload_file_cancel(argv: list[str]) -> None:
+    _upload_file_state_command(
+        argv,
+        name="upload-file-cancel",
+        ipc_name="upload-file-cancel",
+        description="Cancel an armed chooser-target upload for a tab",
+    )
 
 
 # ─── Toggles and passthroughs ───────────────────────────────────

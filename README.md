@@ -16,6 +16,18 @@ vimbrowser-cli/
 
 No third-party Python dependencies are required; it uses the system `python3` unless a local `.venv/bin/python3` exists.
 
+## Bash tool timeout units
+
+When invoking this CLI through Exocortex's `bash` tool, its `timeout` field is
+in **milliseconds**. Use `30000` for a 30-second outer timeout, not `30`.
+Python-backed commands normally take tens of milliseconds just to start, so a
+value such as `30` can terminate an otherwise successful invocation after it
+has already received and printed its IPC response. This produces a misleading
+message such as `command timed out after 0.1s` followed by `SIGTERM`.
+
+Wrapping the command in coreutils `timeout 5s ...` does not override a shorter
+outer `bash` tool timeout.
+
 ## Socket resolution
 
 Commands connect to the first available socket in this order:
@@ -58,6 +70,12 @@ vimbrowser-cli js-file @active /tmp/script.js
 vimbrowser-cli html @active
 vimbrowser-cli text @active
 vimbrowser-cli screenshot @active -o /tmp/tab.png
+vimbrowser-cli upload-file @active '#attachment' /home/me/report.pdf
+vimbrowser-cli upload-file @active index:1 /tmp/front.png /tmp/back.png
+vimbrowser-cli upload-file @active 'activate:#browse-button' /home/me/resume.pdf
+vimbrowser-cli upload-file @active chooser /home/me/resume.pdf
+vimbrowser-cli upload-file-status @active --pretty
+vimbrowser-cli upload-file-cancel @active
 vimbrowser-cli shader on
 vimbrowser-cli showfps off
 vimbrowser-cli cookies @active
@@ -79,6 +97,57 @@ Tab arguments accept stable vimbrowser tab IDs plus these convenience aliases:
 
 `js` and `raw` are declared in `manifest.json` as literal-tail commands so Exocortex's bash harness can pass JavaScript/raw IPC text without manual shell escaping.
 
+### Secure local-file upload
+
+`upload-file TAB TARGET ABSOLUTE_PATH [ABSOLUTE_PATH ...]` assigns explicit local
+files to a page `<input type=file>`, or atomically native-activates one custom
+Browse control and supplies the chooser it opens. It does **not** inject file
+contents into JavaScript or ask page script to open arbitrary paths.
+
+Targets are deliberately strict:
+
+- a bare target or `css:SELECTOR` is a CSS selector in the main document and
+  must match exactly one element; zero or multiple matches are errors
+- `index:N` explicitly selects the zero-based Nth `input[type=file]`; use this
+  only when the input ordering is a stable part of the controlled page
+- `activate:SELECTOR` asks the customized Chromium backend to resolve one visible
+  element, activate it through Blink's trusted mouse input path, and supply the
+  open-file chooser it causes; this is one synchronous IPC command and no native
+  file-picker window is shown
+- `chooser` arms the next browser-native open-file request from that stable tab
+  for 60 seconds; after it reports `armed`, the user must click the intended
+  upload control
+- the resolved element must actually be `<input type=file>`
+
+Every path must be absolute, existing, readable, and a regular file. Both the
+CLI and browser validate paths, and the browser canonicalizes them before the
+CEF call. The browser rejects multiple paths for an input without `multiple`
+and checks `accept` extensions/MIME types where they can be inferred from file
+extensions. Responses are structured JSON and contain counts/constraint
+metadata, never file contents or local path strings. Example:
+
+```json
+{"ok":true,"tabid":3,"file_count":1,"target":{"kind":"css","match_count":1},"input":{"multiple":false,"accept":"application/pdf"}}
+```
+
+For dynamic pages, wait until the intended control exists and prefer a
+site-specific unique selector. The command never falls back to a different
+input when a target is missing or ambiguous. This command requires a rebuilt
+vimbrowser that advertises `upload-file` in `vimbrowser-cli commands`.
+
+Prefer `activate:SELECTOR` for sites that expose only a button, create an input
+ephemerally during a click, or use a File System Access picker. Chromium verifies
+that native hit testing reaches the selected control, gives the click real
+transient user activation, and carries a browser-generated nonce through the
+resulting chooser. Only that causally matching chooser can receive the files; an
+unrelated chooser from the same tab is canceled rather than consuming the arm.
+The IPC reply is held until the picker is consumed or fails.
+Zero/multiple/invisible/obscured targets and controls that do not open a chooser
+return structured errors. The plain `chooser` target remains for human-directed
+workflows: its arm is tab-bound, one-shot, and automatically expires, and the user
+then clicks the intended control. Use `upload-file-status` to inspect it and
+`upload-file-cancel` whenever an arm is no longer intended.
+
 `open-context NAME TARGET` creates a tab backed by a named persistent CEF request
 context. Its cookies and site storage are isolated from ordinary tabs and from
 other named contexts. This requires a vimbrowser build that advertises the
@@ -96,6 +165,13 @@ bin/vimbrowser-cli status --pretty
 bin/vimbrowser-cli tabs --json | python3 -m json.tool >/dev/null
 bin/vimbrowser-cli js @active 'document.location.href'
 bin/vimbrowser-cli screenshot @active -o /tmp/vimbrowser-cli-test.png
+```
+
+The non-mutating automated tests use a temporary fake IPC socket and do not
+connect to or change a running browser:
+
+```bash
+python3 -m unittest discover -s tests -v
 ```
 
 ## License

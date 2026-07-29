@@ -70,9 +70,14 @@ vimbrowser-cli js-file @active /tmp/script.js
 vimbrowser-cli html @active
 vimbrowser-cli text @active
 vimbrowser-cli screenshot @active -o /tmp/tab.png
+vimbrowser-cli frame-tree @active --pretty
+vimbrowser-cli frame-text @active FRAME_ID
+vimbrowser-cli frame-js @active FRAME_ID 'document.title'
+vimbrowser-cli inspect-controls @active --frame FRAME_ID --role button --name-exact Browse --require-one --pretty
 vimbrowser-cli upload-file @active '#attachment' /home/me/report.pdf
 vimbrowser-cli upload-file @active index:1 /tmp/front.png /tmp/back.png
 vimbrowser-cli upload-file @active 'activate:#browse-button' /home/me/resume.pdf
+vimbrowser-cli upload-file @active 'handle:eh1_INSPECTED_TARGET' /home/me/resume.pdf
 vimbrowser-cli upload-file @active chooser /home/me/resume.pdf
 vimbrowser-cli upload-file-status @active --pretty
 vimbrowser-cli upload-file-cancel @active
@@ -114,6 +119,8 @@ Targets are deliberately strict:
   element, activate it through Blink's trusted mouse input path, and supply the
   open-file chooser it causes; this is one synchronous IPC command and no native
   file-picker window is shown
+- `handle:HANDLE` consumes one short-lived exact-node capability returned by
+  `inspect-controls`; use this for cross-origin frame/OOPIF controls
 - `chooser` arms the next browser-native open-file request from that stable tab
   for 60 seconds; after it reports `armed`, the user must click the intended
   upload control
@@ -147,6 +154,26 @@ return structured errors. The plain `chooser` target remains for human-directed
 workflows: its arm is tab-bound, one-shot, and automatically expires, and the user
 then clicks the intended control. Use `upload-file-status` to inspect it and
 `upload-file-cancel` whenever an arm is no longer intended.
+
+### Exact cross-origin frame controls
+
+`frame-tree TAB` exposes the current primary frame hierarchy using opaque CEF
+frame IDs. `frame-html`, `frame-text`, and `frame-js` address one exact frame, so
+an agent can inspect an embedded cross-origin picker without violating the
+page's same-origin boundary or guessing from a screenshot.
+
+`inspect-controls` is read-only. It lists all matching native clickable
+candidates in one frame and returns bounded role/name/text/context metadata plus
+one random handle per exact DOM node. It never activates the first match.
+`--require-one` turns zero/multiple matches into a structured nonzero result
+while retaining the candidate list for diagnosis.
+
+Handles expire after 15 seconds, are one-shot, and are bound inside Chromium to
+the browser, frame, document, and original DOM node. `upload-file handle:...`
+revalidates node identity, visibility, disabled state, local hit testing, and the
+OOPIF compositor target before activating. Navigation, clone replacement,
+coverage, replay, and cross-tab use fail closed. No coordinates, renderer DOM
+IDs, process IDs, paths, or filenames are included in inspection responses.
 
 `open-context NAME TARGET` creates a tab backed by a named persistent CEF request
 context. Its cookies and site storage are isolated from ordinary tabs and from

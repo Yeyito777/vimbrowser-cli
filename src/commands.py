@@ -19,6 +19,7 @@ MAX_UPLOAD_FILES = 32
 MAX_UPLOAD_SELECTOR_BYTES = 4096
 MAX_UPLOAD_PATH_BYTES = 4096
 MAX_UPLOAD_PAYLOAD_BYTES = 256 * 1024
+MAX_HANDLE_BYTES = 128
 
 
 def _parent() -> argparse.ArgumentParser:
@@ -128,6 +129,11 @@ def _parse_upload_target(value: str) -> dict:
     """Return the versioned IPC target object for a CLI target expression."""
     if value == "chooser":
         return {"kind": "chooser"}
+    if value.startswith("handle:"):
+        handle = value.removeprefix("handle:")
+        if not handle.startswith("eh1_") or len(handle.encode("utf-8")) > MAX_HANDLE_BYTES:
+            raise ValueError("inspected element handle is malformed")
+        return {"kind": "handle", "value": handle}
     if value.startswith("activate:"):
         selector = value.removeprefix("activate:")
         if not selector:
@@ -549,6 +555,128 @@ def cmd_screenshot(argv: list[str]) -> None:
     sys.stdout.buffer.write(image)
 
 
+def cmd_frame_tree(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} frame-tree", parents=[_parent()],
+        description="List the current exact main/child frame tree for a tab",
+    )
+    p.add_argument("tab", nargs="?", default="@active",
+                   help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+    args = p.parse_args(argv)
+    payload = _json_response(args, f"frame-tree {_resolve_tab(args, args.tab)}")
+    _print_json(payload, pretty=args.pretty)
+
+
+def _frame_document_command(argv: list[str], *, name: str, ipc_name: str,
+                            description: str) -> None:
+    p = argparse.ArgumentParser(prog=f"{PROG} {name}", parents=[_parent()],
+                                description=description)
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("frame", help="Opaque frame ID returned by frame-tree")
+    args = p.parse_args(argv)
+    print(_send(args, f"{ipc_name} {_resolve_tab(args, args.tab)} {args.frame}"), end="")
+
+
+def cmd_frame_html(argv: list[str]) -> None:
+    _frame_document_command(argv, name="frame-html", ipc_name="frame-html",
+                            description="Dump HTML from one exact current frame")
+
+
+def cmd_frame_text(argv: list[str]) -> None:
+    _frame_document_command(argv, name="frame-text", ipc_name="frame-text",
+                            description="Dump text from one exact current frame")
+
+
+def cmd_frame_js(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} frame-js", parents=[_parent()],
+        description="Evaluate JavaScript in one exact current frame",
+    )
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("frame", help="Opaque frame ID returned by frame-tree")
+    p.add_argument("script", nargs=argparse.REMAINDER, help="JavaScript")
+    args = p.parse_args(argv)
+    script = _joined_tail(args.script, "JavaScript", p)
+    print(_send(args, f"frame-js {_resolve_tab(args, args.tab)} {args.frame} {script}"), end="")
+
+
+def cmd_inspect_controls(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} inspect-controls", parents=[_parent()],
+        description=(
+            "Inspect clickable controls in one exact frame without activating them, "
+            "and mint short-lived exact-node handles"
+        ),
+    )
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("--frame", required=True,
+                   help="Opaque frame ID returned by frame-tree")
+    p.add_argument("--role", default="", help="Exact computed accessibility role")
+    p.add_argument("--name-exact", default="", help="Exact computed accessible name")
+    p.add_argument("--context-contains", default="",
+                   help="Required case-sensitive text in bounded surrounding context")
+    p.add_argument("--limit", type=int, default=100,
+                   help="Maximum controls to return (1-100; default 100)")
+    p.add_argument("--require-one", action="store_true",
+                   help="Fail unless inspection returns exactly one control")
+    p.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+    args = p.parse_args(argv)
+    if not 1 <= args.limit <= 100:
+        p.error("--limit must be between 1 and 100")
+    for label, value, maximum in (
+        ("role", args.role, 128),
+        ("name", args.name_exact, 256),
+        ("context", args.context_contains, 512),
+        ("frame", args.frame, 256),
+    ):
+        if len(value.encode("utf-8")) > maximum:
+            p.error(f"{label} is too long")
+    query = {
+        "version": 1,
+        "frame_id": args.frame,
+        "filter": {
+            "role": args.role,
+            "exact_name": args.name_exact,
+            "context_contains": args.context_contains,
+        },
+        "limit": args.limit,
+    }
+    token = base64.b64encode(
+        json.dumps(query, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).decode("ascii")
+    payload = _json_response(
+        args,
+        f"inspect-controls {_resolve_tab(args, args.tab)} {token}",
+        label="inspect-controls",
+    )
+    if payload.get("ok") is not True:
+        _print_json(payload, pretty=args.pretty)
+        raise SystemExit(1)
+    inspection = payload.get("inspection", {})
+    count = inspection.get("match_count")
+    truncated = inspection.get("truncated") is True
+    if args.require_one and (count != 1 or truncated):
+        payload["ok"] = False
+        payload["error"] = {
+            "code": (
+                "target_not_found"
+                if count == 0 and not truncated
+                else "ambiguous_target"
+            ),
+            "message": (
+                "inspection found no matching controls"
+                if count == 0 and not truncated
+                else "inspection found more than one matching control"
+            ),
+            "match_count": count,
+            "truncated": truncated,
+        }
+        _print_json(payload, pretty=args.pretty)
+        raise SystemExit(1)
+    _print_json(payload, pretty=args.pretty)
+
+
 def cmd_upload_file(argv: list[str]) -> None:
     p = argparse.ArgumentParser(
         prog=f"{PROG} upload-file",
@@ -562,14 +690,15 @@ def cmd_upload_file(argv: list[str]) -> None:
             "exactly one element, or index:N for the explicit zero-based Nth "
             "input[type=file] in the main document. Use activate:SELECTOR to "
             "atomically native-activate one visible chooser control and supply "
-            "the picker it opens. Use chooser to arm the next native open-file "
+            "the picker it opens. Use handle:HANDLE after inspect-controls for "
+            "an exact control in any frame. Use chooser to arm the next native open-file "
             "chooser from the tab for 60 seconds."
         ),
     )
     p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
     p.add_argument("target",
                    help=("Unique CSS selector, css:SELECTOR, index:N, "
-                         "activate:SELECTOR, or chooser"))
+                         "activate:SELECTOR, handle:HANDLE, or chooser"))
     p.add_argument("paths", nargs="+", metavar="ABSOLUTE_PATH",
                    help="Absolute existing regular file path(s)")
     p.add_argument("--pretty", action="store_true", help="Pretty-print response JSON")

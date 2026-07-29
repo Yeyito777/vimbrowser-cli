@@ -208,6 +208,28 @@ class UploadFileTests(unittest.TestCase):
                 {"kind": "activate", "value": "#browse-resume"},
             )
 
+    def test_exact_handle_target_is_encoded_without_frame_or_selector(self) -> None:
+        response = (
+            b'{"ok":true,"tabid":2,"file_count":1,'
+            b'"target":{"kind":"handle","match_count":1},'
+            b'"chooser":{"state":"consumed","dialog_mode":"open"}}\n'
+        )
+        handle = "eh1_0123456789ABCDEF0123456789ABCDEF"
+        with tempfile.TemporaryDirectory(prefix="vimbrowser-cli-upload-") as tmp:
+            directory = Path(tmp)
+            upload = directory / "resume.pdf"
+            upload.write_bytes(b"pdf fixture")
+            with OneShotServer(directory, response) as server:
+                result = self.run_cli(
+                    "upload-file", "2", f"handle:{handle}", str(upload),
+                    "--socket", str(server.path), "--timeout", "1",
+                )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        token = server.command.decode("utf-8").strip().split()[2]
+        payload = json.loads(base64.b64decode(token, validate=True))
+        self.assertEqual(payload["target"], {"kind": "handle", "value": handle})
+
     def test_chooser_status_and_cancel_have_cli_surfaces(self) -> None:
         response = (
             b'{"ok":true,"tabid":2,"target":{"kind":"chooser"},'
@@ -277,6 +299,102 @@ class UploadFileTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(json.loads(result.stdout)["error"]["code"], "target_not_file_input")
         self.assertNotIn(str(upload), result.stdout + result.stderr)
+
+
+class FrameInspectionTests(unittest.TestCase):
+    def run_cli(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(CLI), *args], capture_output=True, text=True, timeout=2,
+            check=False,
+        )
+
+    def test_frame_tree_command(self) -> None:
+        response = b'{"ok":true,"tabid":7,"main_frame_id":"main","frames":[]}\n'
+        with tempfile.TemporaryDirectory(prefix="vimbrowser-cli-frame-") as tmp:
+            with OneShotServer(Path(tmp), response) as server:
+                result = self.run_cli(
+                    "frame-tree", "7", "--socket", str(server.path),
+                    "--timeout", "1",
+                )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(server.command, b"frame-tree 7\n")
+
+    def test_inspect_controls_encodes_exact_frame_and_filters(self) -> None:
+        response = (
+            b'{"ok":true,"tabid":7,"frame":{"id":"frame-A"},'
+            b'"inspection":{"match_count":1,"controls":[{'
+            b'"handle":"eh1_token","role":"button","name":"Browse"}]}}\n'
+        )
+        with tempfile.TemporaryDirectory(prefix="vimbrowser-cli-frame-") as tmp:
+            with OneShotServer(Path(tmp), response) as server:
+                result = self.run_cli(
+                    "inspect-controls", "7", "--frame", "frame-A",
+                    "--role", "button", "--name-exact", "Browse",
+                    "--context-contains", "Upload files", "--require-one",
+                    "--socket", str(server.path), "--timeout", "1",
+                )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        words = server.command.decode("utf-8").strip().split()
+        self.assertEqual(words[:2], ["inspect-controls", "7"])
+        query = json.loads(base64.b64decode(words[2], validate=True))
+        self.assertEqual(query["frame_id"], "frame-A")
+        self.assertEqual(query["filter"]["role"], "button")
+        self.assertEqual(query["filter"]["exact_name"], "Browse")
+        self.assertEqual(query["filter"]["context_contains"], "Upload files")
+
+    def test_require_one_rejects_ambiguous_results_without_hiding_candidates(self) -> None:
+        response = (
+            b'{"ok":true,"tabid":7,"frame":{"id":"frame-A"},'
+            b'"inspection":{"match_count":2,"controls":['
+            b'{"handle":"eh1_one"},{"handle":"eh1_two"}]}}\n'
+        )
+        with tempfile.TemporaryDirectory(prefix="vimbrowser-cli-frame-") as tmp:
+            with OneShotServer(Path(tmp), response) as server:
+                result = self.run_cli(
+                    "inspect-controls", "7", "--frame", "frame-A",
+                    "--name-exact", "Browse", "--require-one",
+                    "--socket", str(server.path), "--timeout", "1",
+                )
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["error"]["code"], "ambiguous_target")
+        self.assertEqual(len(payload["inspection"]["controls"]), 2)
+
+    def test_require_one_rejects_truncated_single_return(self) -> None:
+        response = (
+            b'{"ok":true,"tabid":7,"frame":{"id":"frame-A"},'
+            b'"inspection":{"match_count":2,"returned_count":1,'
+            b'"truncated":true,"controls":[{"handle":"eh1_one"}]}}\n'
+        )
+        with tempfile.TemporaryDirectory(prefix="vimbrowser-cli-frame-") as tmp:
+            with OneShotServer(Path(tmp), response) as server:
+                result = self.run_cli(
+                    "inspect-controls", "7", "--frame", "frame-A",
+                    "--name-exact", "Browse", "--limit", "1", "--require-one",
+                    "--socket", str(server.path), "--timeout", "1",
+                )
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["error"]["code"], "ambiguous_target")
+        self.assertTrue(payload["error"]["truncated"])
+        self.assertEqual(len(payload["inspection"]["controls"]), 1)
+
+    def test_inspect_controls_preserves_browser_error(self) -> None:
+        response = (
+            b'{"ok":false,"error":{"code":"stale_document",'
+            b'"message":"frame document changed"}}\n'
+        )
+        with tempfile.TemporaryDirectory(prefix="vimbrowser-cli-frame-") as tmp:
+            with OneShotServer(Path(tmp), response):
+                result = self.run_cli(
+                    "inspect-controls", "7", "--frame", "frame-A",
+                    "--require-one", "--socket", str(Path(tmp) / "ipc.sock"),
+                    "--timeout", "1",
+                )
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["error"]["code"], "stale_document")
+        self.assertNotIn("inspection", payload)
 
 
 if __name__ == "__main__":

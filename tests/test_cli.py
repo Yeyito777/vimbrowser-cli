@@ -95,6 +95,74 @@ class CliExitTests(unittest.TestCase):
             self.assertLess(elapsed, 1)
 
 
+class StdinPayloadTests(unittest.TestCase):
+    def run_cli(self, *args: str, input_text: str = "") -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(CLI), *args], input=input_text, capture_output=True, text=True,
+            timeout=2, check=False,
+        )
+
+    def test_js_preserves_exact_multiline_utf8_via_base64(self) -> None:
+        source = "  const value = `$HOME  ${USER}`;\\n\nvalue + ' 👁️  ';  \n"
+        response = b'{"ok":true,"value":"ok"}\n'
+        with tempfile.TemporaryDirectory(prefix="vimbrowser-cli-js-") as tmp:
+            with OneShotServer(Path(tmp), response) as server:
+                result = self.run_cli(
+                    "js", "7", "--socket", str(server.path), "--timeout", "1",
+                    input_text=source,
+                )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command, tab, encoded = server.command.decode("utf-8").strip().split()
+        self.assertEqual((command, tab), ("js-base64", "7"))
+        self.assertEqual(base64.b64decode(encoded).decode("utf-8"), source)
+
+    def test_frame_js_preserves_exact_payload_via_base64(self) -> None:
+        source = "\n(() => 'two  spaces')()\n"
+        response = b'{"ok":true,"value":"two  spaces"}\n'
+        with tempfile.TemporaryDirectory(prefix="vimbrowser-cli-frame-js-") as tmp:
+            with OneShotServer(Path(tmp), response) as server:
+                result = self.run_cli(
+                    "frame-js", "7", "frame-A", "--socket", str(server.path),
+                    "--timeout", "1", input_text=source,
+                )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command, tab, frame, encoded = server.command.decode("utf-8").strip().split()
+        self.assertEqual((command, tab, frame), ("frame-js-base64", "7", "frame-A"))
+        self.assertEqual(base64.b64decode(encoded).decode("utf-8"), source)
+
+    def test_raw_sends_one_exact_command_line(self) -> None:
+        command = "network 7 detail request-$HOME"
+        response = b'{"ok":true}\n'
+        with tempfile.TemporaryDirectory(prefix="vimbrowser-cli-raw-") as tmp:
+            with OneShotServer(Path(tmp), response) as server:
+                result = self.run_cli(
+                    "raw", "--socket", str(server.path), "--timeout", "1",
+                    input_text=command,
+                )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(server.command, command.encode("utf-8") + b"\n")
+
+    def test_inline_and_missing_payloads_fail_before_ipc(self) -> None:
+        cases = (
+            (("js", "7", "document.title"), "JavaScript must be provided via stdin"),
+            (("frame-js", "7", "frame-A", "document.title"), "JavaScript must be provided via stdin"),
+            (("raw", "status"), "raw command must be provided via stdin"),
+            (("js", "7"), "JavaScript is required on stdin"),
+            (("frame-js", "7", "frame-A"), "JavaScript is required on stdin"),
+            (("raw",), "raw command is required on stdin"),
+        )
+        for args, message in cases:
+            with self.subTest(args=args):
+                result = self.run_cli(*args)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(message, result.stderr)
+
+    def test_raw_rejects_multiple_lines_without_trimming(self) -> None:
+        result = self.run_cli("raw", input_text="status\n")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("exactly one command line without CR, LF, or NUL", result.stderr)
+
+
 class UploadFileTests(unittest.TestCase):
     def run_cli(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(

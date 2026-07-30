@@ -75,6 +75,11 @@ Tab resolution:
   @first      First tab in the stack
   @last       Last tab in the stack
 
+Payload input:
+  js and frame-js read exact UTF-8 JavaScript from stdin.
+  raw reads one exact UTF-8 IPC command line from stdin.
+  Inline payload arguments are not accepted.
+
 Run 'vimbrowser-cli <command> --help' for command-specific usage.
 EOF
 }

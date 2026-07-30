@@ -20,6 +20,7 @@ MAX_UPLOAD_SELECTOR_BYTES = 4096
 MAX_UPLOAD_PATH_BYTES = 4096
 MAX_UPLOAD_PAYLOAD_BYTES = 256 * 1024
 MAX_HANDLE_BYTES = 128
+MAX_JS_BYTES = 1024 * 1024
 
 
 def _parent() -> argparse.ArgumentParser:
@@ -114,6 +115,34 @@ def _joined_tail(parts: list[str], what: str, parser: argparse.ArgumentParser) -
     if not parts:
         parser.error(f"missing {what}")
     return " ".join(parts)
+
+
+def _stdin_payload(parser: argparse.ArgumentParser, what: str,
+                   *, one_line: bool = False) -> str:
+    data = sys.stdin.buffer.read()
+    if not data:
+        parser.error(f"{what} is required on stdin")
+    try:
+        value = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        parser.error(f"{what} on stdin must be valid UTF-8")
+    if one_line and ("\n" in value or "\r" in value or "\0" in value):
+        parser.error(f"{what} on stdin must be exactly one command line without CR, LF, or NUL")
+    return value
+
+
+def _encoded_javascript(parser: argparse.ArgumentParser) -> str:
+    source = _stdin_payload(parser, "JavaScript")
+    encoded = source.encode("utf-8")
+    if len(encoded) > MAX_JS_BYTES:
+        parser.error(f"JavaScript on stdin exceeds the {MAX_JS_BYTES}-byte limit")
+    return base64.b64encode(encoded).decode("ascii")
+
+
+def _reject_inline_payload(parser: argparse.ArgumentParser, extras: list[str],
+                           what: str) -> None:
+    if extras:
+        parser.error(f"{what} must be provided via stdin; inline payload is not accepted")
 
 
 def _upload_error(code: str, message: str, *, exit_code: int = 2,
@@ -477,12 +506,16 @@ def _optional_tab_and_tail(args, parser, tail_name: str) -> tuple[str, str]:
 
 def cmd_js(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog=f"{PROG} js", parents=[_parent()],
-                                description="Evaluate JavaScript in a tab")
-    p.add_argument("parts", nargs=argparse.REMAINDER,
-                   help="[tabid|@active|@first|@last] JavaScript")
-    args = p.parse_args(argv)
-    tab, script = _optional_tab_and_tail(args, p, "JavaScript")
-    print(_send(args, f"js {tab} {script}"), end="")
+                                description="Evaluate exact JavaScript from stdin in a tab",
+                                epilog="JavaScript is required on stdin; inline payload is not accepted.")
+    p.add_argument("tab", nargs="?", default="@active",
+                   help="Stable tab ID, @active, @first, or @last (default: active)")
+    args, extras = p.parse_known_args(argv)
+    if not _looks_like_tab_spec(args.tab):
+        extras.insert(0, args.tab)
+    _reject_inline_payload(p, extras, "JavaScript")
+    tab = _resolve_tab(args, args.tab)
+    print(_send(args, f"js-base64 {tab} {_encoded_javascript(p)}"), end="")
 
 
 def cmd_js_file(argv: list[str]) -> None:
@@ -591,14 +624,17 @@ def cmd_frame_text(argv: list[str]) -> None:
 def cmd_frame_js(argv: list[str]) -> None:
     p = argparse.ArgumentParser(
         prog=f"{PROG} frame-js", parents=[_parent()],
-        description="Evaluate JavaScript in one exact current frame",
+        description="Evaluate exact JavaScript from stdin in one current frame",
+        epilog="JavaScript is required on stdin; inline payload is not accepted.",
     )
     p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
     p.add_argument("frame", help="Opaque frame ID returned by frame-tree")
-    p.add_argument("script", nargs=argparse.REMAINDER, help="JavaScript")
-    args = p.parse_args(argv)
-    script = _joined_tail(args.script, "JavaScript", p)
-    print(_send(args, f"frame-js {_resolve_tab(args, args.tab)} {args.frame} {script}"), end="")
+    args, extras = p.parse_known_args(argv)
+    _reject_inline_payload(p, extras, "JavaScript")
+    print(_send(
+        args,
+        f"frame-js-base64 {_resolve_tab(args, args.tab)} {args.frame} {_encoded_javascript(p)}",
+    ), end="")
 
 
 def cmd_inspect_controls(argv: list[str]) -> None:
@@ -851,9 +887,9 @@ def cmd_cookie_set(argv: list[str]) -> None:
 
 def cmd_raw(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog=f"{PROG} raw", parents=[_parent()],
-                                description="Send a raw vimbrowser IPC command line")
-    p.add_argument("command", nargs=argparse.REMAINDER,
-                   help="Raw command line to send")
-    args = p.parse_args(argv)
-    command = _joined_tail(args.command, "raw command", p)
+                                description="Send one exact raw IPC command line from stdin",
+                                epilog="The command is required on stdin; inline payload is not accepted.")
+    args, extras = p.parse_known_args(argv)
+    _reject_inline_payload(p, extras, "raw command")
+    command = _stdin_payload(p, "raw command", one_line=True)
     print(_send(args, command), end="")

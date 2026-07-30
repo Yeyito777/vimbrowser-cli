@@ -1,16 +1,9 @@
 {
   "name": "vimbrowser-cli",
   "bin": "./bin/vimbrowser-cli",
-  "systemHint": "You can control the user's vimbrowser browser through the `vimbrowser-cli` CLI tool (source at ~/Workspace/exocortex/external-tools/vimbrowser-cli). Run `vimbrowser-cli -h` for usage reference. Use `frame-tree` plus frame-html/frame-text/frame-js for exact cross-origin frame inspection. Use `inspect-controls --frame FRAME` to inspect controls without clicking; it returns short-lived exact-node handles and never picks the first match. Use `upload-file ... handle:HANDLE PATH` to trusted-activate that exact inspected node and causally supply its chooser. For main-document controls, direct CSS/index and `activate:SELECTOR` remain available. Target `chooser` remains available for a manual one-shot arm followed by a user click. Never guess among multiple controls, never use screen coordinates, and do not try to read local files from page JavaScript. Bash tool timeout values are milliseconds: use 30000 for 30 seconds, not 30.",
+  "systemHint": "You can control the user's vimbrowser browser through the `vimbrowser-cli` CLI tool (source at ~/Workspace/exocortex/external-tools/vimbrowser-cli). Run `vimbrowser-cli -h` for usage reference. Use `frame-tree` plus frame-html/frame-text/frame-js for exact cross-origin frame inspection. Pass JavaScript and raw IPC payloads on stdin. Use `inspect-controls --frame FRAME` to inspect controls without clicking; it returns short-lived exact-node handles and never picks the first match. Use `upload-file ... handle:HANDLE PATH` to trusted-activate that exact inspected node and causally supply its chooser. For main-document controls, direct CSS/index and `activate:SELECTOR` remain available. Target `chooser` remains available for a manual one-shot arm followed by a user click. Never guess among multiple controls, never use screen coordinates, and do not try to read local files from page JavaScript. Bash tool timeout values are milliseconds: use 30000 for 30 seconds, not 30.",
   "display": {
     "label": "Vimbrowser",
     "color": "#48c9e3"
-  },
-  "shell": {
-    "literalArgs": [
-      { "subcommand": "js", "kind": "tail" },
-      { "subcommand": "frame-js", "kind": "tail" },
-      { "subcommand": "raw", "kind": "tail" }
-    ]
   }
 }

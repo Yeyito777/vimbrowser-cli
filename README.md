@@ -65,14 +65,14 @@ vimbrowser-cli scroll 600
 vimbrowser-cli url
 vimbrowser-cli fps
 vimbrowser-cli refresh
-vimbrowser-cli js @active 'document.title'
+printf '%s' 'document.title' | vimbrowser-cli js @active
 vimbrowser-cli js-file @active /tmp/script.js
 vimbrowser-cli html @active
 vimbrowser-cli text @active
 vimbrowser-cli screenshot @active -o /tmp/tab.png
 vimbrowser-cli frame-tree @active --pretty
 vimbrowser-cli frame-text @active FRAME_ID
-vimbrowser-cli frame-js @active FRAME_ID 'document.title'
+printf '%s' 'document.title' | vimbrowser-cli frame-js @active FRAME_ID
 vimbrowser-cli inspect-controls @active --frame FRAME_ID --role button --name-exact Browse --require-one --pretty
 vimbrowser-cli upload-file @active '#attachment' /home/me/report.pdf
 vimbrowser-cli upload-file @active index:1 /tmp/front.png /tmp/back.png
@@ -88,7 +88,7 @@ vimbrowser-cli cookies --url https://www.google.com/
 vimbrowser-cli cookie-delete @active session
 vimbrowser-cli cookie-set @active debug true
 vimbrowser-cli network @active list
-vimbrowser-cli raw status
+printf '%s' 'status' | vimbrowser-cli raw
 ```
 
 `vimbrowser-cli cookies --url URL` uses the browser's profile-level
@@ -100,7 +100,11 @@ Tab arguments accept stable vimbrowser tab IDs plus these convenience aliases:
 - `@first`
 - `@last`
 
-`js` and `raw` are declared in `manifest.json` as literal-tail commands so Exocortex's bash harness can pass JavaScript/raw IPC text without manual shell escaping.
+`js`, `frame-js`, and `raw` accept their primary opaque payload only on stdin.
+JavaScript is strict UTF-8, preserved byte-for-byte, and transported to the
+browser as base64 so IPC framing and whitespace tokenization cannot alter it.
+`raw` accepts one exact UTF-8 IPC command line without CR, LF, or NUL. Inline
+payload arguments are rejected before connecting to the browser.
 
 ### Secure local-file upload
 
@@ -190,7 +194,7 @@ python3 -m json.tool manifest.json >/dev/null
 bin/vimbrowser-cli -h
 bin/vimbrowser-cli status --pretty
 bin/vimbrowser-cli tabs --json | python3 -m json.tool >/dev/null
-bin/vimbrowser-cli js @active 'document.location.href'
+printf '%s' 'document.location.href' | bin/vimbrowser-cli js @active
 bin/vimbrowser-cli screenshot @active -o /tmp/vimbrowser-cli-test.png
 ```
 

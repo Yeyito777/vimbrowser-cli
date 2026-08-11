@@ -51,6 +51,7 @@ commands:
   frame-text   Dump text from one exact frame
   frame-js     Evaluate JavaScript in one exact frame
   inspect-controls Inspect controls in one frame and mint exact short-lived handles
+  activate-control Trusted-activate one exact inspected control
   upload-file  Assign files to an input or atomically activate a chooser control
   upload-file-status  Show chooser-target upload state for a tab
   upload-file-cancel  Cancel an armed chooser-target upload
@@ -92,7 +93,7 @@ fi
 cmd="$1"; shift
 
 case "$cmd" in
-    status|protocol|version|commands|browser-help|tabs|current-tab|focus|tab-order|open|open-context|load|close-tab|reload|reload-ignore-cache|back|forward|stop|zoom|scroll|scroll-tab|url|fps|refresh|js|js-file|html|text|screenshot|frame-tree|frame-html|frame-text|frame-js|inspect-controls|upload-file|upload-file-status|upload-file-cancel|shader|showfps|network|cookies|cookie-delete|cookie-set|raw)
+    status|protocol|version|commands|browser-help|tabs|current-tab|focus|tab-order|open|open-context|load|close-tab|reload|reload-ignore-cache|back|forward|stop|zoom|scroll|scroll-tab|url|fps|refresh|js|js-file|html|text|screenshot|frame-tree|frame-html|frame-text|frame-js|inspect-controls|activate-control|upload-file|upload-file-status|upload-file-cancel|shader|showfps|network|cookies|cookie-delete|cookie-set|raw)
         pyfn="cmd_${cmd//-/_}"
         exec "$PYTHON" -c "import sys; from src.commands import $pyfn; $pyfn(sys.argv[1:])" "$@" ;;
     help|--help|-h)

@@ -713,6 +713,37 @@ def cmd_inspect_controls(argv: list[str]) -> None:
     _print_json(payload, pretty=args.pretty)
 
 
+def cmd_activate_control(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} activate-control", parents=[_parent()],
+        description=(
+            "Trusted-activate one exact short-lived control handle returned by "
+            "inspect-controls"
+        ),
+        epilog=(
+            "The browser consumes HANDLE once, revalidates its frame, document, "
+            "node, visibility, enabled state, and compositor hit target, then grants "
+            "transient user activation only for that native click."
+        ),
+    )
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("handle", help="Exact eh1_ handle returned by inspect-controls")
+    p.add_argument("--pretty", action="store_true", help="Pretty-print response JSON")
+    args = p.parse_args(argv)
+    if (not args.handle.startswith("eh1_") or
+            len(args.handle.encode("utf-8")) > MAX_HANDLE_BYTES or
+            any(character.isspace() for character in args.handle)):
+        p.error("handle is malformed")
+    payload = _json_response(
+        args,
+        f"activate-control {_resolve_tab(args, args.tab)} {args.handle}",
+        label="activate-control",
+    )
+    _print_json(payload, pretty=args.pretty)
+    if payload.get("ok") is not True:
+        raise SystemExit(1)
+
+
 def cmd_upload_file(argv: list[str]) -> None:
     p = argparse.ArgumentParser(
         prog=f"{PROG} upload-file",

@@ -177,6 +177,31 @@ class UploadFileTests(unittest.TestCase):
         result = self.run_cli("-h")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("upload-file", result.stdout)
+        self.assertIn("activate-control", result.stdout)
+
+    def test_activate_control_sends_exact_handle(self) -> None:
+        handle = "eh1_exact-control-capability"
+        response = (
+            b'{"ok":true,"tabid":7,"target":{"kind":"handle"},'
+            b'"activation":{"dispatched":true,"user_activation":true}}\n'
+        )
+        with tempfile.TemporaryDirectory(prefix="vimbrowser-cli-activate-") as tmp:
+            with OneShotServer(Path(tmp), response) as server:
+                result = self.run_cli(
+                    "activate-control", "7", handle,
+                    "--socket", str(server.path), "--timeout", "1",
+                )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            server.command.decode("utf-8").strip(),
+            f"activate-control 7 {handle}",
+        )
+        self.assertTrue(json.loads(result.stdout)["activation"]["user_activation"])
+
+    def test_activate_control_rejects_malformed_handle_before_ipc(self) -> None:
+        result = self.run_cli("activate-control", "7", "not-a-handle")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("handle is malformed", result.stderr)
 
     def test_css_target_and_paths_are_encoded_in_versioned_payload(self) -> None:
         response = (

@@ -74,6 +74,7 @@ vimbrowser-cli frame-tree @active --pretty
 vimbrowser-cli frame-text @active FRAME_ID
 printf '%s' 'document.title' | vimbrowser-cli frame-js @active FRAME_ID
 vimbrowser-cli inspect-controls @active --frame FRAME_ID --role button --name-exact Browse --require-one --pretty
+vimbrowser-cli activate-control @active eh1_INSPECTED_TARGET
 vimbrowser-cli upload-file @active '#attachment' /home/me/report.pdf
 vimbrowser-cli upload-file @active index:1 /tmp/front.png /tmp/back.png
 vimbrowser-cli upload-file @active 'activate:#browse-button' /home/me/resume.pdf
@@ -178,6 +179,12 @@ revalidates node identity, visibility, disabled state, local hit testing, and th
 OOPIF compositor target before activating. Navigation, clone replacement,
 coverage, replay, and cross-tab use fail closed. No coordinates, renderer DOM
 IDs, process IDs, paths, or filenames are included in inspection responses.
+
+`activate-control TAB HANDLE` uses the same exact-node and compositor
+revalidation, then grants transient Chromium user activation only for that one
+native click. Use it for a uniquely inspected control whose handler requires a
+real interaction, such as “Log in with Google.” It deliberately has no selector,
+coordinate, or arbitrary-script mode; plain DOM `.click()` remains untrusted.
 
 `open-context NAME TARGET` creates a tab backed by a named persistent CEF request
 context. Its cookies and site storage are isolated from ordinary tabs and from

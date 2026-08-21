@@ -184,11 +184,44 @@ class StdinPayloadTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(server.command, command.encode("utf-8") + b"\n")
 
+    def test_network_execute_preserves_sensitive_json_via_base64(self) -> None:
+        payload = {
+            "version": 1,
+            "templateRequestId": 73,
+            "url": "https://mail.example.test/sync?opaque=$TOKEN",
+            "method": "POST",
+            "bodyUtf8": "line one\nline two $BODY",
+            "headerOverrides": {"X-Framework-Xsrf-Token": "$SECRET"},
+        }
+        source = json.dumps(payload, ensure_ascii=False, indent=2)
+        response = b'{"ok":true,"status":200}\n'
+        with tempfile.TemporaryDirectory(prefix="vimbrowser-cli-network-") as tmp:
+            with OneShotServer(Path(tmp), response) as server:
+                result = self.run_cli(
+                    "network-execute", "--socket", str(server.path),
+                    "--timeout", "1", "7", input_text=source,
+                )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command, tab, encoded = server.command.rstrip(b"\n").split(b" ", 2)
+        self.assertEqual((command, tab), (b"network-execute-base64", b"7"))
+        self.assertEqual(base64.b64decode(encoded), source.encode("utf-8"))
+        self.assertNotIn(b"$SECRET", server.command)
+        self.assertEqual(result.stdout, response.decode())
+
+    def test_network_execute_rejects_inline_payload(self) -> None:
+        result = self.run_cli(
+            "network-execute", "7", '{"version":1,"templateRequestId":1}',
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be provided via stdin", result.stderr)
+
     def test_inline_and_missing_payloads_fail_before_ipc(self) -> None:
         cases = (
             (("js", "7", "document.title"), "JavaScript must be provided via stdin"),
             (("frame-js", "7", "frame-A", "document.title"), "JavaScript must be provided via stdin"),
             (("raw", "status"), "raw command must be provided via stdin"),
+            (("network-execute", "7"), "network execute JSON payload is required on stdin"),
             (("js", "7"), "JavaScript is required on stdin"),
             (("frame-js", "7", "frame-A"), "JavaScript is required on stdin"),
             (("raw",), "raw command is required on stdin"),

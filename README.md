@@ -88,7 +88,10 @@ vimbrowser-cli cookies @active
 vimbrowser-cli cookies --url https://www.google.com/
 vimbrowser-cli cookie-delete @active session
 vimbrowser-cli cookie-set @active debug true
+vimbrowser-cli network @active capture on https://mail.example.test/sync/
+vimbrowser-cli network @active wait https://mail.example.test/sync/ 15000
 vimbrowser-cli network @active list
+printf '%s' "$request_json" | vimbrowser-cli network-execute @active
 printf '%s' 'status' | vimbrowser-cli raw
 ```
 
@@ -101,11 +104,49 @@ Tab arguments accept stable vimbrowser tab IDs plus these convenience aliases:
 - `@first`
 - `@last`
 
-`js`, `frame-js`, and `raw` accept their primary opaque payload only on stdin.
+`js`, `frame-js`, `network-execute`, and `raw` accept their primary opaque payload only on stdin.
 JavaScript is strict UTF-8, preserved byte-for-byte, and transported to the
 browser as base64 so IPC framing and whitespace tokenization cannot alter it.
+`network-execute` similarly transports versioned JSON without exposing request
+bodies, dynamic URLs, or header values in OS process arguments.
 `raw` accepts one exact UTF-8 IPC command line without CR, LF, or NUL. Inline
 payload arguments are rejected before connecting to the browser.
+
+### Context-bound network broker
+
+`network TAB capture on [URL_PREFIX]` dynamically enables native request capture
+for one exact tab. `capture status` reports the filter and latest request-ID
+cursor; `capture off` stops new records. `network TAB wait URL_PREFIX
+[TIMEOUT_MS] [AFTER_REQUEST_ID]` returns the newest matching existing request or
+waits for a later one. Pass the cursor when only a newly created request is
+acceptable. The maximum wait is 30 seconds; the CLI gives network commands a
+35-second transport timeout.
+
+`network-execute TAB` reads a version-1 JSON mutation from stdin and derives a
+request from one captured template. Minimal example:
+
+```json
+{
+  "version": 1,
+  "templateRequestId": 42,
+  "url": "https://mail.example.test/sync/next",
+  "method": "POST",
+  "bodyUtf8": "generated body",
+  "headerOverrides": {"X-Request-Token": "template token"},
+  "removeHeaders": ["X-Unwanted"],
+  "timeoutMs": 30000
+}
+```
+
+Omitted URL/method/body/headers inherit from the capture. `bodyBase64` is the
+binary alternative to `bodyUtf8`. The URL must remain on the template's exact
+HTTP(S) origin. Captured `Cookie`, `Host`, and `Content-Length` are always
+removed and cannot be overridden; CEF attaches fresh cookies from the exact
+tab's request context, computes transport headers, processes response
+`Set-Cookie`, and refuses to follow redirects. Results include final URL,
+status, headers, `body_utf8` (or `null`), `body_base64`, byte count, and an
+explicit truncation flag. See vimbrowser's `docs/ipc.md` for the complete schema
+and limits.
 
 ### Secure local-file upload
 

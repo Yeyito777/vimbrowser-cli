@@ -21,6 +21,7 @@ MAX_UPLOAD_PATH_BYTES = 4096
 MAX_UPLOAD_PAYLOAD_BYTES = 256 * 1024
 MAX_HANDLE_BYTES = 128
 MAX_JS_BYTES = 1024 * 1024
+MAX_NETWORK_EXECUTE_PAYLOAD_BYTES = 700 * 1024
 
 
 def _parent() -> argparse.ArgumentParser:
@@ -850,9 +851,11 @@ def cmd_showfps(argv: list[str]) -> None:
 
 def cmd_network(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog=f"{PROG} network", parents=[_parent()],
-                                description="Pass through network debugging IPC commands")
+                                description="Control exact-tab network capture, waiting, inspection, and replay")
+    p.set_defaults(timeout=35.0)
     p.add_argument("parts", nargs=argparse.REMAINDER,
-                   help="<tabid|@active|@first|@last> list|detail|body|replay|clear ...")
+                   help=("<tabid|@active|@first|@last> capture|wait|list|detail|"
+                         "body|replay|clear ..."))
     args = p.parse_args(argv)
     if not args.parts:
         p.error("missing network arguments")
@@ -860,6 +863,41 @@ def cmd_network(argv: list[str]) -> None:
     if _looks_like_tab_spec(parts[0]):
         parts[0] = _resolve_tab(args, parts[0])
     print(_send(args, "network " + " ".join(parts)), end="")
+
+
+def cmd_network_execute(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} network-execute",
+        parents=[_parent()],
+        description=(
+            "Execute a same-origin request derived from a captured request in "
+            "one exact tab request context"
+        ),
+        epilog=(
+            "A version-1 JSON object is required on stdin. Sensitive URL, body, "
+            "and header values are never accepted as command-line arguments."
+        ),
+    )
+    p.set_defaults(timeout=35.0)
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    args, extras = p.parse_known_args(argv)
+    _reject_inline_payload(p, extras, "network execute payload")
+    payload = sys.stdin.buffer.read(MAX_NETWORK_EXECUTE_PAYLOAD_BYTES + 1)
+    if not payload:
+        p.error("network execute JSON payload is required on stdin")
+    if len(payload) > MAX_NETWORK_EXECUTE_PAYLOAD_BYTES:
+        p.error("network execute JSON payload exceeds the 700 KiB limit")
+    try:
+        value = json.loads(payload.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        p.error("network execute payload must be valid UTF-8 JSON")
+    if (not isinstance(value, dict) or value.get("version") != 1 or
+            type(value.get("templateRequestId")) is not int or
+            value["templateRequestId"] <= 0):
+        p.error("network execute payload must use version 1 and a positive templateRequestId")
+    encoded = base64.b64encode(payload).decode("ascii")
+    tab = _resolve_tab(args, args.tab)
+    print(_send(args, f"network-execute-base64 {tab} {encoded}"), end="")
 
 
 def cmd_cookies(argv: list[str]) -> None:

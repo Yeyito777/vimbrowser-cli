@@ -94,6 +94,48 @@ class CliExitTests(unittest.TestCase):
             self.assertEqual(result.stdout, response.decode())
             self.assertLess(elapsed, 1)
 
+    def test_open_uses_background_tab_ipc(self) -> None:
+        response = b'{"active_tabid":1,"tabs":[]}\n'
+        with tempfile.TemporaryDirectory(prefix="vimbrowser-cli-open-") as tmp:
+            with OneShotServer(Path(tmp), response) as server:
+                result = subprocess.run(
+                    [
+                        str(CLI), "open", "--socket", str(server.path),
+                        "--timeout", "1", "https://example.com/path?q=1",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=False,
+                )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            server.command,
+            b"open-background-tab https://example.com/path?q=1\n",
+        )
+
+    def test_open_context_uses_background_context_ipc(self) -> None:
+        response = b'{"active_tabid":1,"tabs":[]}\n'
+        with tempfile.TemporaryDirectory(prefix="vimbrowser-cli-context-") as tmp:
+            with OneShotServer(Path(tmp), response) as server:
+                result = subprocess.run(
+                    [
+                        str(CLI), "open-context", "--socket", str(server.path),
+                        "--timeout", "1", "work", "https://example.com",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=False,
+                )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            server.command,
+            b"open-background-context-tab work https://example.com\n",
+        )
+
 
 class StdinPayloadTests(unittest.TestCase):
     def run_cli(self, *args: str, input_text: str = "") -> subprocess.CompletedProcess[str]:

@@ -186,10 +186,11 @@ native click. Use it for a uniquely inspected control whose handler requires a
 real interaction, such as “Log in with Google.” It deliberately has no selector,
 coordinate, or arbitrary-script mode; plain DOM `.click()` remains untrusted.
 
-`open-context NAME TARGET` creates a tab backed by a named persistent CEF request
-context. Its cookies and site storage are isolated from ordinary tabs and from
-other named contexts. This requires a vimbrowser build that advertises the
-`open-context-tab` IPC command.
+`open` and `open-context` always create background tabs. `focus` is the only
+named CLI command that selects another tab. `open-context NAME TARGET` backs the
+new tab with a named persistent CEF request context; its cookies and site storage
+are isolated from ordinary tabs and from other named contexts. This requires a
+vimbrowser build that advertises the `open-background-context-tab` IPC command.
 
 ## Validation
 

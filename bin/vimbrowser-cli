@@ -26,8 +26,8 @@ commands:
   current-tab  Show the active tab (--id-only for just the tab ID)
   focus        Focus a tab; not needed for AI use unless user explicitly asks
   tab-order    Move a tab to a zero-based tab-stack index
-  open         Open a URL/search/local path in a new active tab
-  open-context Open a URL in a named, isolated persistent browser context
+  open         Open a URL/search/local path in a new background tab
+  open-context Open a URL in a background tab with an isolated persistent context
   load         Load a URL/search/local path into an existing tab
   close-tab    Close the active tab or a tab by stable ID
   reload       Reload the active tab or a tab by stable ID

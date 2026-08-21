@@ -346,12 +346,12 @@ def cmd_tab_order(argv: list[str]) -> None:
 
 def cmd_open(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog=f"{PROG} open", parents=[_parent()],
-                                description="Open a URL/search/local path in a new active tab")
+                                description="Open a URL/search/local path in a new background tab")
     p.add_argument("target", nargs=argparse.REMAINDER,
                    help="URL, search query, or local path")
     args = p.parse_args(argv)
     target = _joined_tail(args.target, "target", p)
-    print(_send(args, f"open-tab {target}"), end="")
+    print(_send(args, f"open-background-tab {target}"), end="")
 
 
 def cmd_open_context(argv: list[str]) -> None:
@@ -359,7 +359,8 @@ def cmd_open_context(argv: list[str]) -> None:
         prog=f"{PROG} open-context",
         parents=[_parent()],
         description=(
-            "Open a URL/search/local path in a named persistent browser context. "
+            "Open a URL/search/local path in a background tab using a named "
+            "persistent browser context. "
             "Cookies and site storage are isolated from normal tabs and other contexts."
         ),
     )
@@ -368,7 +369,7 @@ def cmd_open_context(argv: list[str]) -> None:
                    help="URL, search query, or local path")
     args = p.parse_args(argv)
     target = _joined_tail(args.target, "target", p)
-    print(_send(args, f"open-context-tab {args.context} {target}"), end="")
+    print(_send(args, f"open-background-context-tab {args.context} {target}"), end="")
 
 
 def cmd_load(argv: list[str]) -> None:

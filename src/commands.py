@@ -24,14 +24,16 @@ MAX_JS_BYTES = 1024 * 1024
 MAX_NETWORK_EXECUTE_PAYLOAD_BYTES = 700 * 1024
 
 
-def _parent() -> argparse.ArgumentParser:
+def _parent(default_timeout: float = 10.0) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--socket", default=None,
                    help="IPC socket path (overrides discovery and VIMBROWSER_IPC)")
     p.add_argument("--profile-dir", default=None,
                    help="Profile directory; uses DIR/ipc.sock")
-    p.add_argument("--timeout", type=float, default=10.0,
-                   help="IPC timeout in seconds (default: 10)")
+    p.add_argument(
+        "--timeout", type=float, default=default_timeout,
+        help=f"IPC timeout in seconds (default: {default_timeout:g})",
+    )
     return p
 
 
@@ -850,9 +852,8 @@ def cmd_showfps(argv: list[str]) -> None:
 
 
 def cmd_network(argv: list[str]) -> None:
-    p = argparse.ArgumentParser(prog=f"{PROG} network", parents=[_parent()],
+    p = argparse.ArgumentParser(prog=f"{PROG} network", parents=[_parent(35.0)],
                                 description="Control exact-tab network capture, waiting, inspection, and replay")
-    p.set_defaults(timeout=35.0)
     p.add_argument("parts", nargs=argparse.REMAINDER,
                    help=("<tabid|@active|@first|@last> capture|wait|list|detail|"
                          "body|replay|clear ..."))
@@ -868,7 +869,7 @@ def cmd_network(argv: list[str]) -> None:
 def cmd_network_execute(argv: list[str]) -> None:
     p = argparse.ArgumentParser(
         prog=f"{PROG} network-execute",
-        parents=[_parent()],
+        parents=[_parent(35.0)],
         description=(
             "Execute a same-origin request derived from a captured request in "
             "one exact tab request context"
@@ -878,7 +879,6 @@ def cmd_network_execute(argv: list[str]) -> None:
             "and header values are never accepted as command-line arguments."
         ),
     )
-    p.set_defaults(timeout=35.0)
     p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
     args, extras = p.parse_known_args(argv)
     _reject_inline_payload(p, extras, "network execute payload")

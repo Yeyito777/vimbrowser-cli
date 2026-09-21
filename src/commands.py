@@ -5,13 +5,22 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
 
 from src import ipc
 
 PROG = "vimbrowser-cli"
+UPLOAD_PAYLOAD_VERSION = 1
+MAX_UPLOAD_FILES = 32
+MAX_UPLOAD_SELECTOR_BYTES = 4096
+MAX_UPLOAD_PATH_BYTES = 4096
+MAX_UPLOAD_PAYLOAD_BYTES = 256 * 1024
+MAX_HANDLE_BYTES = 128
+MAX_JS_BYTES = 1024 * 1024
 
 
 def _parent() -> argparse.ArgumentParser:
@@ -37,14 +46,15 @@ def _send(args, command: str) -> str:
         ipc.die(str(exc))
 
 
-def _json_response(args, command: str) -> dict:
+def _json_response(args, command: str, *, label: str | None = None) -> dict:
     response = _send(args, command)
+    response_label = label or command
     try:
         value = json.loads(response)
     except json.JSONDecodeError as exc:
-        ipc.die(f"invalid JSON response for {command!r}: {exc}\n{response[:4096]}")
+        ipc.die(f"invalid JSON response for {response_label!r}: {exc}\n{response[:4096]}")
     if not isinstance(value, dict):
-        ipc.die(f"unexpected non-object JSON response for {command!r}")
+        ipc.die(f"unexpected non-object JSON response for {response_label!r}")
     return value
 
 
@@ -105,6 +115,127 @@ def _joined_tail(parts: list[str], what: str, parser: argparse.ArgumentParser) -
     if not parts:
         parser.error(f"missing {what}")
     return " ".join(parts)
+
+
+def _stdin_payload(parser: argparse.ArgumentParser, what: str,
+                   *, one_line: bool = False) -> str:
+    data = sys.stdin.buffer.read()
+    if not data:
+        parser.error(f"{what} is required on stdin")
+    try:
+        value = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        parser.error(f"{what} on stdin must be valid UTF-8")
+    if one_line and ("\n" in value or "\r" in value or "\0" in value):
+        parser.error(f"{what} on stdin must be exactly one command line without CR, LF, or NUL")
+    return value
+
+
+def _encoded_javascript(parser: argparse.ArgumentParser) -> str:
+    source = _stdin_payload(parser, "JavaScript")
+    encoded = source.encode("utf-8")
+    if len(encoded) > MAX_JS_BYTES:
+        parser.error(f"JavaScript on stdin exceeds the {MAX_JS_BYTES}-byte limit")
+    return base64.b64encode(encoded).decode("ascii")
+
+
+def _reject_inline_payload(parser: argparse.ArgumentParser, extras: list[str],
+                           what: str) -> None:
+    if extras:
+        parser.error(f"{what} must be provided via stdin; inline payload is not accepted")
+
+
+def _upload_error(code: str, message: str, *, exit_code: int = 2,
+                  **details) -> None:
+    """Print a structured upload error without echoing any local path."""
+    error = {"code": code, "message": message}
+    error.update(details)
+    _print_json({"ok": False, "error": error})
+    raise SystemExit(exit_code)
+
+
+def _parse_upload_target(value: str) -> dict:
+    """Return the versioned IPC target object for a CLI target expression."""
+    if value == "chooser":
+        return {"kind": "chooser"}
+    if value.startswith("handle:"):
+        handle = value.removeprefix("handle:")
+        if not handle.startswith("eh1_") or len(handle.encode("utf-8")) > MAX_HANDLE_BYTES:
+            raise ValueError("inspected element handle is malformed")
+        return {"kind": "handle", "value": handle}
+    if value.startswith("activate:"):
+        selector = value.removeprefix("activate:")
+        if not selector:
+            raise ValueError("activation CSS selector target must not be empty")
+        if len(selector.encode("utf-8")) > MAX_UPLOAD_SELECTOR_BYTES:
+            raise ValueError("activation CSS selector target is too long")
+        return {"kind": "activate", "value": selector}
+    if value.startswith("index:"):
+        index_text = value.removeprefix("index:")
+        if not index_text.isdecimal():
+            raise ValueError("index target must be a non-negative decimal integer")
+        index = int(index_text)
+        if index > 10000:
+            raise ValueError("index target exceeds the supported limit")
+        return {"kind": "index", "value": index}
+
+    selector = value.removeprefix("css:") if value.startswith("css:") else value
+    if not selector:
+        raise ValueError("CSS selector target must not be empty")
+    if len(selector.encode("utf-8")) > MAX_UPLOAD_SELECTOR_BYTES:
+        raise ValueError("CSS selector target is too long")
+    return {"kind": "css", "value": selector}
+
+
+def _validated_upload_paths(values: list[str]) -> list[str]:
+    """Validate and canonicalize explicit local upload paths.
+
+    The browser repeats these checks in its own process. Keeping the CLI check
+    makes obvious caller mistakes fail before any IPC mutation is attempted.
+    """
+    if not values:
+        raise ValueError("at least one file path is required")
+    if len(values) > MAX_UPLOAD_FILES:
+        raise ValueError(f"at most {MAX_UPLOAD_FILES} files may be assigned at once")
+
+    paths: list[str] = []
+    for index, value in enumerate(values):
+        path = Path(value)
+        if not path.is_absolute():
+            raise ValueError(f"file path {index + 1} must be absolute")
+        if len(os.fsencode(value)) > MAX_UPLOAD_PATH_BYTES:
+            raise ValueError(f"file path {index + 1} is too long")
+        try:
+            info = path.stat()
+            canonical = path.resolve(strict=True)
+        except (FileNotFoundError, NotADirectoryError):
+            raise ValueError(f"file path {index + 1} does not exist") from None
+        except OSError as exc:
+            raise ValueError(
+                f"file path {index + 1} could not be inspected: {exc.strerror or 'OS error'}"
+            ) from None
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"file path {index + 1} is not a regular file")
+        if not os.access(canonical, os.R_OK):
+            raise ValueError(f"file path {index + 1} is not readable")
+        canonical_text = str(canonical)
+        if len(os.fsencode(canonical_text)) > MAX_UPLOAD_PATH_BYTES:
+            raise ValueError(f"canonical file path {index + 1} is too long")
+        paths.append(canonical_text)
+    return paths
+
+
+def _upload_ipc_command(tabid: str, target: dict, paths: list[str]) -> str:
+    """Encode a whitespace-safe v1 payload for the stable raw IPC command."""
+    payload = json.dumps(
+        {"version": UPLOAD_PAYLOAD_VERSION, "target": target, "paths": paths},
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    if len(payload) > MAX_UPLOAD_PAYLOAD_BYTES:
+        raise ValueError("encoded upload request is too large")
+    token = base64.b64encode(payload).decode("ascii")
+    return f"upload-file {tabid} {token}"
 
 
 # ─── State and tabs ─────────────────────────────────────────────
@@ -215,12 +346,12 @@ def cmd_tab_order(argv: list[str]) -> None:
 
 def cmd_open(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog=f"{PROG} open", parents=[_parent()],
-                                description="Open a URL/search/local path in a new active tab")
+                                description="Open a URL/search/local path in a new background tab")
     p.add_argument("target", nargs=argparse.REMAINDER,
                    help="URL, search query, or local path")
     args = p.parse_args(argv)
     target = _joined_tail(args.target, "target", p)
-    print(_send(args, f"open-tab {target}"), end="")
+    print(_send(args, f"open-background-tab {target}"), end="")
 
 
 def cmd_open_context(argv: list[str]) -> None:
@@ -228,7 +359,8 @@ def cmd_open_context(argv: list[str]) -> None:
         prog=f"{PROG} open-context",
         parents=[_parent()],
         description=(
-            "Open a URL/search/local path in a named persistent browser context. "
+            "Open a URL/search/local path in a background tab using a named "
+            "persistent browser context. "
             "Cookies and site storage are isolated from normal tabs and other contexts."
         ),
     )
@@ -237,7 +369,7 @@ def cmd_open_context(argv: list[str]) -> None:
                    help="URL, search query, or local path")
     args = p.parse_args(argv)
     target = _joined_tail(args.target, "target", p)
-    print(_send(args, f"open-context-tab {args.context} {target}"), end="")
+    print(_send(args, f"open-background-context-tab {args.context} {target}"), end="")
 
 
 def cmd_load(argv: list[str]) -> None:
@@ -375,12 +507,16 @@ def _optional_tab_and_tail(args, parser, tail_name: str) -> tuple[str, str]:
 
 def cmd_js(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog=f"{PROG} js", parents=[_parent()],
-                                description="Evaluate JavaScript in a tab")
-    p.add_argument("parts", nargs=argparse.REMAINDER,
-                   help="[tabid|@active|@first|@last] JavaScript")
-    args = p.parse_args(argv)
-    tab, script = _optional_tab_and_tail(args, p, "JavaScript")
-    print(_send(args, f"js {tab} {script}"), end="")
+                                description="Evaluate exact JavaScript from stdin in a tab",
+                                epilog="JavaScript is required on stdin; inline payload is not accepted.")
+    p.add_argument("tab", nargs="?", default="@active",
+                   help="Stable tab ID, @active, @first, or @last (default: active)")
+    args, extras = p.parse_known_args(argv)
+    if not _looks_like_tab_spec(args.tab):
+        extras.insert(0, args.tab)
+    _reject_inline_payload(p, extras, "JavaScript")
+    tab = _resolve_tab(args, args.tab)
+    print(_send(args, f"js-base64 {tab} {_encoded_javascript(p)}"), end="")
 
 
 def cmd_js_file(argv: list[str]) -> None:
@@ -451,6 +587,242 @@ def cmd_screenshot(argv: list[str]) -> None:
         return
 
     sys.stdout.buffer.write(image)
+
+
+def cmd_frame_tree(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} frame-tree", parents=[_parent()],
+        description="List the current exact main/child frame tree for a tab",
+    )
+    p.add_argument("tab", nargs="?", default="@active",
+                   help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+    args = p.parse_args(argv)
+    payload = _json_response(args, f"frame-tree {_resolve_tab(args, args.tab)}")
+    _print_json(payload, pretty=args.pretty)
+
+
+def _frame_document_command(argv: list[str], *, name: str, ipc_name: str,
+                            description: str) -> None:
+    p = argparse.ArgumentParser(prog=f"{PROG} {name}", parents=[_parent()],
+                                description=description)
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("frame", help="Opaque frame ID returned by frame-tree")
+    args = p.parse_args(argv)
+    print(_send(args, f"{ipc_name} {_resolve_tab(args, args.tab)} {args.frame}"), end="")
+
+
+def cmd_frame_html(argv: list[str]) -> None:
+    _frame_document_command(argv, name="frame-html", ipc_name="frame-html",
+                            description="Dump HTML from one exact current frame")
+
+
+def cmd_frame_text(argv: list[str]) -> None:
+    _frame_document_command(argv, name="frame-text", ipc_name="frame-text",
+                            description="Dump text from one exact current frame")
+
+
+def cmd_frame_js(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} frame-js", parents=[_parent()],
+        description="Evaluate exact JavaScript from stdin in one current frame",
+        epilog="JavaScript is required on stdin; inline payload is not accepted.",
+    )
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("frame", help="Opaque frame ID returned by frame-tree")
+    args, extras = p.parse_known_args(argv)
+    _reject_inline_payload(p, extras, "JavaScript")
+    print(_send(
+        args,
+        f"frame-js-base64 {_resolve_tab(args, args.tab)} {args.frame} {_encoded_javascript(p)}",
+    ), end="")
+
+
+def cmd_inspect_controls(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} inspect-controls", parents=[_parent()],
+        description=(
+            "Inspect clickable controls in one exact frame without activating them, "
+            "and mint short-lived exact-node handles"
+        ),
+    )
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("--frame", required=True,
+                   help="Opaque frame ID returned by frame-tree")
+    p.add_argument("--role", default="", help="Exact computed accessibility role")
+    p.add_argument("--name-exact", default="", help="Exact computed accessible name")
+    p.add_argument("--context-contains", default="",
+                   help="Required case-sensitive text in bounded surrounding context")
+    p.add_argument("--limit", type=int, default=100,
+                   help="Maximum controls to return (1-100; default 100)")
+    p.add_argument("--require-one", action="store_true",
+                   help="Fail unless inspection returns exactly one control")
+    p.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+    args = p.parse_args(argv)
+    if not 1 <= args.limit <= 100:
+        p.error("--limit must be between 1 and 100")
+    for label, value, maximum in (
+        ("role", args.role, 128),
+        ("name", args.name_exact, 256),
+        ("context", args.context_contains, 512),
+        ("frame", args.frame, 256),
+    ):
+        if len(value.encode("utf-8")) > maximum:
+            p.error(f"{label} is too long")
+    query = {
+        "version": 1,
+        "frame_id": args.frame,
+        "filter": {
+            "role": args.role,
+            "exact_name": args.name_exact,
+            "context_contains": args.context_contains,
+        },
+        "limit": args.limit,
+    }
+    token = base64.b64encode(
+        json.dumps(query, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).decode("ascii")
+    payload = _json_response(
+        args,
+        f"inspect-controls {_resolve_tab(args, args.tab)} {token}",
+        label="inspect-controls",
+    )
+    if payload.get("ok") is not True:
+        _print_json(payload, pretty=args.pretty)
+        raise SystemExit(1)
+    inspection = payload.get("inspection", {})
+    count = inspection.get("match_count")
+    truncated = inspection.get("truncated") is True
+    if args.require_one and (count != 1 or truncated):
+        payload["ok"] = False
+        payload["error"] = {
+            "code": (
+                "target_not_found"
+                if count == 0 and not truncated
+                else "ambiguous_target"
+            ),
+            "message": (
+                "inspection found no matching controls"
+                if count == 0 and not truncated
+                else "inspection found more than one matching control"
+            ),
+            "match_count": count,
+            "truncated": truncated,
+        }
+        _print_json(payload, pretty=args.pretty)
+        raise SystemExit(1)
+    _print_json(payload, pretty=args.pretty)
+
+
+def cmd_activate_control(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} activate-control", parents=[_parent()],
+        description=(
+            "Trusted-activate one exact short-lived control handle returned by "
+            "inspect-controls"
+        ),
+        epilog=(
+            "The browser consumes HANDLE once, revalidates its frame, document, "
+            "node, visibility, enabled state, and compositor hit target, then grants "
+            "transient user activation only for that native click."
+        ),
+    )
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("handle", help="Exact eh1_ handle returned by inspect-controls")
+    p.add_argument("--pretty", action="store_true", help="Pretty-print response JSON")
+    args = p.parse_args(argv)
+    if (not args.handle.startswith("eh1_") or
+            len(args.handle.encode("utf-8")) > MAX_HANDLE_BYTES or
+            any(character.isspace() for character in args.handle)):
+        p.error("handle is malformed")
+    payload = _json_response(
+        args,
+        f"activate-control {_resolve_tab(args, args.tab)} {args.handle}",
+        label="activate-control",
+    )
+    _print_json(payload, pretty=args.pretty)
+    if payload.get("ok") is not True:
+        raise SystemExit(1)
+
+
+def cmd_upload_file(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} upload-file",
+        parents=[_parent()],
+        description=(
+            "Assign approved local files to one unambiguous page <input type=file>, "
+            "or atomically activate a chooser control through the browser process"
+        ),
+        epilog=(
+            "TARGET is a CSS selector (optionally prefixed css:) and must match "
+            "exactly one element, or index:N for the explicit zero-based Nth "
+            "input[type=file] in the main document. Use activate:SELECTOR to "
+            "atomically native-activate one visible chooser control and supply "
+            "the picker it opens. Use handle:HANDLE after inspect-controls for "
+            "an exact control in any frame. Use chooser to arm the next native open-file "
+            "chooser from the tab for 60 seconds."
+        ),
+    )
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("target",
+                   help=("Unique CSS selector, css:SELECTOR, index:N, "
+                         "activate:SELECTOR, handle:HANDLE, or chooser"))
+    p.add_argument("paths", nargs="+", metavar="ABSOLUTE_PATH",
+                   help="Absolute existing regular file path(s)")
+    p.add_argument("--pretty", action="store_true", help="Pretty-print response JSON")
+    args = p.parse_args(argv)
+
+    try:
+        target = _parse_upload_target(args.target)
+    except ValueError as exc:
+        _upload_error("invalid_target", str(exc))
+    try:
+        paths = _validated_upload_paths(args.paths)
+    except ValueError as exc:
+        _upload_error("invalid_path", str(exc))
+
+    tabid = _resolve_tab(args, args.tab)
+    try:
+        command = _upload_ipc_command(tabid, target, paths)
+    except ValueError as exc:
+        _upload_error("request_too_large", str(exc))
+
+    payload = _json_response(args, command, label="upload-file")
+    _print_json(payload, pretty=args.pretty)
+    if payload.get("ok") is not True:
+        raise SystemExit(1)
+
+
+def _upload_file_state_command(argv: list[str], *, name: str,
+                               ipc_name: str, description: str) -> None:
+    p = argparse.ArgumentParser(prog=f"{PROG} {name}", parents=[_parent()],
+                                description=description)
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("--pretty", action="store_true", help="Pretty-print response JSON")
+    args = p.parse_args(argv)
+    tabid = _resolve_tab(args, args.tab)
+    payload = _json_response(args, f"{ipc_name} {tabid}", label=ipc_name)
+    _print_json(payload, pretty=args.pretty)
+    if payload.get("ok") is not True:
+        raise SystemExit(1)
+
+
+def cmd_upload_file_status(argv: list[str]) -> None:
+    _upload_file_state_command(
+        argv,
+        name="upload-file-status",
+        ipc_name="upload-file-status",
+        description="Show the state of a chooser-target upload for a tab",
+    )
+
+
+def cmd_upload_file_cancel(argv: list[str]) -> None:
+    _upload_file_state_command(
+        argv,
+        name="upload-file-cancel",
+        ipc_name="upload-file-cancel",
+        description="Cancel an armed chooser-target upload for a tab",
+    )
 
 
 # ─── Toggles and passthroughs ───────────────────────────────────
@@ -547,9 +919,9 @@ def cmd_cookie_set(argv: list[str]) -> None:
 
 def cmd_raw(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog=f"{PROG} raw", parents=[_parent()],
-                                description="Send a raw vimbrowser IPC command line")
-    p.add_argument("command", nargs=argparse.REMAINDER,
-                   help="Raw command line to send")
-    args = p.parse_args(argv)
-    command = _joined_tail(args.command, "raw command", p)
+                                description="Send one exact raw IPC command line from stdin",
+                                epilog="The command is required on stdin; inline payload is not accepted.")
+    args, extras = p.parse_known_args(argv)
+    _reject_inline_payload(p, extras, "raw command")
+    command = _stdin_payload(p, "raw command", one_line=True)
     print(_send(args, command), end="")

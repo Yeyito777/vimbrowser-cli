@@ -26,8 +26,8 @@ commands:
   current-tab  Show the active tab (--id-only for just the tab ID)
   focus        Focus a tab; not needed for AI use unless user explicitly asks
   tab-order    Move a tab to a zero-based tab-stack index
-  open         Open a URL/search/local path in a new active tab
-  open-context Open a URL in a named, isolated persistent browser context
+  open         Open a URL/search/local path in a new background tab
+  open-context Open a URL in a background tab with an isolated persistent context
   load         Load a URL/search/local path into an existing tab
   close-tab    Close the active tab or a tab by stable ID
   reload       Reload the active tab or a tab by stable ID
@@ -46,6 +46,15 @@ commands:
   html         Dump current full document HTML for a tab
   text         Dump current document text for a tab
   screenshot   Capture a tab screenshot as PNG
+  frame-tree   List the exact main/child frame tree for a tab
+  frame-html   Dump HTML from one exact frame
+  frame-text   Dump text from one exact frame
+  frame-js     Evaluate JavaScript in one exact frame
+  inspect-controls Inspect controls in one frame and mint exact short-lived handles
+  activate-control Trusted-activate one exact inspected control
+  upload-file  Assign files to an input or atomically activate a chooser control
+  upload-file-status  Show chooser-target upload state for a tab
+  upload-file-cancel  Cancel an armed chooser-target upload
   shader       Toggle or set the native page shader
   showfps      Toggle or set the FPS overlay
   network      Pass through network debugging IPC commands
@@ -67,6 +76,11 @@ Tab resolution:
   @first      First tab in the stack
   @last       Last tab in the stack
 
+Payload input:
+  js and frame-js read exact UTF-8 JavaScript from stdin.
+  raw reads one exact UTF-8 IPC command line from stdin.
+  Inline payload arguments are not accepted.
+
 Run 'vimbrowser-cli <command> --help' for command-specific usage.
 EOF
 }
@@ -79,7 +93,7 @@ fi
 cmd="$1"; shift
 
 case "$cmd" in
-    status|protocol|version|commands|browser-help|tabs|current-tab|focus|tab-order|open|open-context|load|close-tab|reload|reload-ignore-cache|back|forward|stop|zoom|scroll|scroll-tab|url|fps|refresh|js|js-file|html|text|screenshot|shader|showfps|network|cookies|cookie-delete|cookie-set|raw)
+    status|protocol|version|commands|browser-help|tabs|current-tab|focus|tab-order|open|open-context|load|close-tab|reload|reload-ignore-cache|back|forward|stop|zoom|scroll|scroll-tab|url|fps|refresh|js|js-file|html|text|screenshot|frame-tree|frame-html|frame-text|frame-js|inspect-controls|activate-control|upload-file|upload-file-status|upload-file-cancel|shader|showfps|network|cookies|cookie-delete|cookie-set|raw)
         pyfn="cmd_${cmd//-/_}"
         exec "$PYTHON" -c "import sys; from src.commands import $pyfn; $pyfn(sys.argv[1:])" "$@" ;;
     help|--help|-h)

@@ -137,6 +137,69 @@ class CliExitTests(unittest.TestCase):
         )
 
 
+class FolderOpenTests(unittest.TestCase):
+    def test_targeted_opens_use_one_background_command(self) -> None:
+        cases = (
+            (["open", "--folder", "42", "https://example.com/path?q=1"],
+             "open-background-tab-in-folder 42 https://example.com/path?q=1"),
+            (["open", "--folder", "0", "two", "words", "--folder", "query"],
+             "open-background-tab-in-folder 0 two words --folder query"),
+            (["open-context", "--folder", "42", "work", "https://example.com"],
+             "open-background-context-tab-in-folder 42 work https://example.com"),
+            (["open-context", "--folder", "0", "work", "/tmp/local", "page.html"],
+             "open-background-context-tab-in-folder 0 work /tmp/local page.html"),
+            (["open", "--folder", "18446744073709551615", "about:blank"],
+             "open-background-tab-in-folder 18446744073709551615 about:blank"),
+        )
+        response = b'{"active_tabid":1,"tabs":[]}\n'
+        for argv, expected in cases:
+            with self.subTest(argv=argv), tempfile.TemporaryDirectory() as tmp:
+                with OneShotServer(Path(tmp), response) as server:
+                    result = subprocess.run(
+                        [str(CLI), argv[0], "--socket", str(server.path), *argv[1:]],
+                        capture_output=True, text=True, timeout=2,
+                    )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(server.command, expected.encode() + b"\n")
+                self.assertEqual(result.stdout, response.decode())
+
+    def test_invalid_folder_fails_before_connecting(self) -> None:
+        for command in ("open", "open-context"):
+            for folder in ("-1", "+1", "1.0", "abc", "１２", "",
+                           "18446744073709551616", "1\nopen-tab"):
+                with self.subTest(command=command, folder=folder):
+                    tail = ["work", "about:blank"] if command == "open-context" else ["about:blank"]
+                    result = subprocess.run(
+                        [str(CLI), command, "--socket", "/nonexistent/ipc.sock",
+                         f"--folder={folder}", *tail],
+                        capture_output=True, text=True, timeout=2,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("folder must be", result.stderr)
+
+    def test_missing_target_fails_before_connecting(self) -> None:
+        for argv in (["open", "--folder", "0"],
+                     ["open-context", "--folder", "0", "work"]):
+            result = subprocess.run(
+                [str(CLI), *argv], capture_output=True, text=True, timeout=2)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("missing target", result.stderr)
+
+    def test_browser_errors_do_not_fallback_to_open_then_move(self) -> None:
+        for response in (b"ERR no such folder\n", b"ERR unknown command\n"):
+            with self.subTest(response=response), tempfile.TemporaryDirectory() as tmp:
+                with OneShotServer(Path(tmp), response) as server:
+                    result = subprocess.run(
+                        [str(CLI), "open", "--socket", str(server.path),
+                         "--folder", "42", "about:blank"],
+                        capture_output=True, text=True, timeout=2,
+                    )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(response.decode().strip(), result.stderr)
+                self.assertEqual(server.command,
+                                 b"open-background-tab-in-folder 42 about:blank\n")
+
+
 class StdinPayloadTests(unittest.TestCase):
     def run_cli(self, *args: str, input_text: str = "") -> subprocess.CompletedProcess[str]:
         return subprocess.run(

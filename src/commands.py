@@ -347,14 +347,34 @@ def cmd_tab_order(argv: list[str]) -> None:
 # ─── Tab navigation/control ─────────────────────────────────────
 
 
+def _folder_id(value: str) -> str:
+    if (not value.isascii() or not value.isdecimal() or
+            len(value) > 20 or int(value) > 2**64 - 1):
+        raise argparse.ArgumentTypeError(
+            "folder must be an unsigned 64-bit decimal ID (0 means root)")
+    return str(int(value))
+
+
+def _open_folder_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--folder", type=_folder_id, metavar="ID",
+        help="Create directly in this existing folder (0=root); put before "
+             "positional arguments. Default: inherit browser placement.",
+    )
+
+
 def cmd_open(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog=f"{PROG} open", parents=[_parent()],
                                 description="Open a URL/search/local path in a new background tab")
+    _open_folder_option(p)
     p.add_argument("target", nargs=argparse.REMAINDER,
                    help="URL, search query, or local path")
     args = p.parse_args(argv)
     target = _joined_tail(args.target, "target", p)
-    print(_send(args, f"open-background-tab {target}"), end="")
+    command = "open-background-tab"
+    if args.folder is not None:
+        command += f"-in-folder {args.folder}"
+    print(_send(args, f"{command} {target}"), end="")
 
 
 def cmd_open_context(argv: list[str]) -> None:
@@ -367,12 +387,16 @@ def cmd_open_context(argv: list[str]) -> None:
             "Cookies and site storage are isolated from normal tabs and other contexts."
         ),
     )
+    _open_folder_option(p)
     p.add_argument("context", help="Context name (lowercase letters, numbers, '_', and '-')")
     p.add_argument("target", nargs=argparse.REMAINDER,
                    help="URL, search query, or local path")
     args = p.parse_args(argv)
     target = _joined_tail(args.target, "target", p)
-    print(_send(args, f"open-background-context-tab {args.context} {target}"), end="")
+    command = "open-background-context-tab"
+    if args.folder is not None:
+        command += f"-in-folder {args.folder}"
+    print(_send(args, f"{command} {args.context} {target}"), end="")
 
 
 def cmd_load(argv: list[str]) -> None:

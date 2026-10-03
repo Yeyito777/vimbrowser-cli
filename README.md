@@ -53,7 +53,10 @@ vimbrowser-cli current-tab --id-only
 vimbrowser-cli focus 3
 vimbrowser-cli tab-order @active 0
 vimbrowser-cli open https://example.com
+vimbrowser-cli open --folder 42 https://example.com
+vimbrowser-cli open --folder 0 https://example.com
 vimbrowser-cli open-context discord-paramount https://discord.com/login
+vimbrowser-cli open-context --folder 42 discord-paramount https://discord.com/login
 vimbrowser-cli load @active https://example.com
 vimbrowser-cli close-tab @last
 vimbrowser-cli reload @active
@@ -232,6 +235,21 @@ named CLI command that selects another tab. `open-context NAME TARGET` backs the
 new tab with a named persistent CEF request context; its cookies and site storage
 are isolated from ordinary tabs and from other named contexts. This requires a
 vimbrowser build that advertises the `open-background-context-tab` IPC command.
+
+`open --folder ID TARGET` and `open-context --folder ID NAME TARGET` create the
+tab directly in an existing sidebar folder in one browser operation, without
+moving it afterward or changing the active tab, sidebar folder, selection, or
+focus. Use `0` for the root. Put options before positional arguments; everything
+after the target begins is URL/search text. List folder IDs with
+`printf '%s' folders | vimbrowser-cli raw`.
+Omitting `--folder` keeps the existing inherited placement: the viewed sidebar
+folder when the sidebar is focused, otherwise the active tab's folder.
+Folder placement is independent of cookie/storage isolation.
+
+This uses the additive `open-background-tab-in-folder` and
+`open-background-context-tab-in-folder` IPC commands. Invalid/missing folders
+fail without creating a tab. Older browsers reject these command names; the CLI
+never silently falls back to opening in the wrong folder or opening then moving.
 
 ## Validation
 

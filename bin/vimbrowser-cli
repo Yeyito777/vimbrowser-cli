@@ -57,7 +57,8 @@ commands:
   upload-file-cancel  Cancel an armed chooser-target upload
   shader       Toggle or set the native page shader
   showfps      Toggle or set the FPS overlay
-  network      Pass through network debugging IPC commands
+  network      Control exact-tab network capture, waiting, inspection, and replay
+  network-execute  Execute a context-bound request from JSON on stdin
   cookies      List cookies visible to a tab or atomically for a URL
   cookie-delete Delete a cookie by name for a tab URL
   cookie-set   Set a cookie for a tab URL
@@ -78,6 +79,7 @@ Tab resolution:
 
 Payload input:
   js and frame-js read exact UTF-8 JavaScript from stdin.
+  network-execute reads its versioned JSON request mutation from stdin.
   raw reads one exact UTF-8 IPC command line from stdin.
   Inline payload arguments are not accepted.
 
@@ -93,7 +95,7 @@ fi
 cmd="$1"; shift
 
 case "$cmd" in
-    status|protocol|version|commands|browser-help|tabs|current-tab|focus|tab-order|open|open-context|load|close-tab|reload|reload-ignore-cache|back|forward|stop|zoom|scroll|scroll-tab|url|fps|refresh|js|js-file|html|text|screenshot|frame-tree|frame-html|frame-text|frame-js|inspect-controls|activate-control|upload-file|upload-file-status|upload-file-cancel|shader|showfps|network|cookies|cookie-delete|cookie-set|raw)
+    status|protocol|version|commands|browser-help|tabs|current-tab|focus|tab-order|open|open-context|load|close-tab|reload|reload-ignore-cache|back|forward|stop|zoom|scroll|scroll-tab|url|fps|refresh|js|js-file|html|text|screenshot|frame-tree|frame-html|frame-text|frame-js|inspect-controls|activate-control|upload-file|upload-file-status|upload-file-cancel|shader|showfps|network|network-execute|cookies|cookie-delete|cookie-set|raw)
         pyfn="cmd_${cmd//-/_}"
         exec "$PYTHON" -c "import sys; from src.commands import $pyfn; $pyfn(sys.argv[1:])" "$@" ;;
     help|--help|-h)

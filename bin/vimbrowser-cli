@@ -31,7 +31,7 @@ commands:
   open         Open a URL/search/local path in a new background tab
   open-context Open a URL in a background tab with an isolated persistent context
   load         Load a URL/search/local path into an existing tab
-  close-tab    Close the active tab or a tab by stable ID
+  close-tab    Close a tab by stable ID (explicit tab required)
   reload       Reload the active tab or a tab by stable ID
   reload-ignore-cache  Hard-reload the active tab or a tab by stable ID
   back         Navigate back in the active tab or a tab by stable ID
@@ -43,7 +43,7 @@ commands:
   url          Print the active tab URL
   fps          Print active-tab FPS sample
   refresh      Print active-browser refresh rate
-  js           Evaluate JavaScript in a tab
+  js           Evaluate JavaScript in an explicit tab
   js-file      Evaluate a local JavaScript file in a tab
   html         Dump current full document HTML for a tab
   text         Dump current document text for a tab
@@ -62,7 +62,7 @@ commands:
   showfps      Toggle or set the FPS overlay
   network      Control exact-tab network capture, waiting, inspection, and replay
   network-execute  Execute a context-bound request from JSON on stdin
-  cookies      List cookies visible to a tab or atomically for a URL
+  cookies      List cookies for an explicit tab or URL; values only with --values
   cookie-delete Delete a cookie by name for a tab URL
   cookie-set   Set a cookie for a tab URL
   raw          Send a raw vimbrowser IPC command line
@@ -100,7 +100,7 @@ cmd="$1"; shift
 case "$cmd" in
     recover-session|diagnose|status|protocol|version|commands|browser-help|tabs|current-tab|focus|tab-order|open|open-context|load|close-tab|reload|reload-ignore-cache|back|forward|stop|zoom|scroll|scroll-tab|url|fps|refresh|js|js-file|html|text|screenshot|activity|frame-tree|frame-html|frame-text|frame-js|inspect-controls|activate-control|upload-file|upload-file-status|upload-file-cancel|shader|showfps|network|network-execute|cookies|cookie-delete|cookie-set|raw)
         pyfn="cmd_${cmd//-/_}"
-        exec "$PYTHON" -c "import sys; from src.commands import $pyfn; $pyfn(sys.argv[1:])" "$@" ;;
+        exec "$PYTHON" -P -c "import sys; from src.commands import $pyfn; $pyfn(sys.argv[1:])" "$@" ;;
     help|--help|-h)
         usage ;;
     *)

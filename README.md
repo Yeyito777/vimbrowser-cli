@@ -89,6 +89,7 @@ vimbrowser-cli shader on
 vimbrowser-cli showfps off
 vimbrowser-cli cookies @active
 vimbrowser-cli cookies --url https://www.google.com/
+vimbrowser-cli cookies --url https://www.google.com/ --values
 vimbrowser-cli cookie-delete @active session
 vimbrowser-cli cookie-set @active debug true
 vimbrowser-cli network @active capture on https://mail.example.test/sync/
@@ -97,6 +98,12 @@ vimbrowser-cli network @active list
 printf '%s' "$request_json" | vimbrowser-cli network-execute @active
 printf '%s' 'status' | vimbrowser-cli raw
 ```
+
+`close-tab`, `js` and `cookies` never default to the active tab: pass a stable
+tab ID, or spell out `@active`. `cookies` omits cookie values (live session
+secrets) and marks the output `"values_hidden": true` unless you pass
+`--values` or set `VIMBROWSER_CLI_COOKIE_VALUES=1`. Programs that need values
+should set the environment variable; older CLIs ignore it.
 
 `vimbrowser-cli cookies --url URL` uses the browser's profile-level
 `cookies-url` IPC command and does not require a matching tab to exist.

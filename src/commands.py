@@ -410,17 +410,23 @@ def cmd_load(argv: list[str]) -> None:
     print(_send(args, f"open {_resolve_tab(args, args.tab)} {target}"), end="")
 
 
+EXPLICIT_TAB_HELP = "Stable tab ID, or @active/@first/@last spelled out (required)"
+
+
+def _require_tab(parser: argparse.ArgumentParser, tab: str | None) -> str:
+    """Mutations and page access never default to whatever tab the user is viewing."""
+    if not tab:
+        parser.error("an explicit tab is required: a stable tab ID, or @active spelled out")
+    return tab
+
+
 def cmd_close_tab(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog=f"{PROG} close-tab", parents=[_parent()],
-                                description="Close the active tab or a tab by stable ID")
-    p.add_argument("tab", nargs="?", default=None,
-                   help="Stable tab ID, @active, @first, or @last (default: active)")
+                                description="Close a tab by stable ID")
+    p.add_argument("tab", nargs="?", default=None, help=EXPLICIT_TAB_HELP)
     args = p.parse_args(argv)
-    if args.tab:
-        command = f"tab-close {_resolve_tab(args, args.tab)}"
-    else:
-        command = "tab-close"
-    print(_send(args, command), end="")
+    tab = _require_tab(p, args.tab)
+    print(_send(args, f"tab-close {_resolve_tab(args, tab)}"), end="")
 
 
 def _optional_tab_command(argv: list[str], *, name: str, ipc_name: str,
@@ -536,13 +542,13 @@ def cmd_js(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog=f"{PROG} js", parents=[_parent()],
                                 description="Evaluate exact JavaScript from stdin in a tab",
                                 epilog="JavaScript is required on stdin; inline payload is not accepted.")
-    p.add_argument("tab", nargs="?", default="@active",
-                   help="Stable tab ID, @active, @first, or @last (default: active)")
+    p.add_argument("tab", nargs="?", default=None, help=EXPLICIT_TAB_HELP)
     args, extras = p.parse_known_args(argv)
-    if not _looks_like_tab_spec(args.tab):
+    if args.tab is not None and not _looks_like_tab_spec(args.tab):
         extras.insert(0, args.tab)
+        args.tab = None
     _reject_inline_payload(p, extras, "JavaScript")
-    tab = _resolve_tab(args, args.tab)
+    tab = _resolve_tab(args, _require_tab(p, args.tab))
     print(_send(args, f"js-base64 {tab} {_encoded_javascript(p)}"), end="")
 
 
@@ -930,7 +936,10 @@ def cmd_cookies(argv: list[str]) -> None:
     p.add_argument("parts", nargs="*",
                    help="[tabid|@active|@first|@last] [url]")
     p.add_argument("--url", help="Atomically list profile cookies visible to this URL without requiring a tab")
+    p.add_argument("--values", action="store_true",
+                   help=f"include cookie values (session secrets); also enabled by {COOKIE_VALUES_ENV}=1")
     args = p.parse_args(argv)
+    show_values = args.values or os.environ.get(COOKIE_VALUES_ENV) == "1"
 
     tab_spec = None
     url = args.url
@@ -944,13 +953,34 @@ def cmd_cookies(argv: list[str]) -> None:
         url = " ".join(parts)
 
     if url and tab_spec is None:
-        print(_send(args, f"cookies-url {url}"), end="")
+        print(_cookie_output(_send(args, f"cookies-url {url}"), show_values), end="")
         return
 
-    command = f"cookies {_resolve_tab(args, tab_spec or '@active')}"
+    command = f"cookies {_resolve_tab(args, _require_tab(p, tab_spec))}"
     if url:
         command += f" {url}"
-    print(_send(args, command), end="")
+    print(_cookie_output(_send(args, command), show_values), end="")
+
+
+COOKIE_VALUES_ENV = "VIMBROWSER_CLI_COOKIE_VALUES"
+
+
+def _cookie_output(response: str, show_values: bool) -> str:
+    """Drop cookie values unless explicitly requested: they are live session secrets."""
+    if show_values:
+        return response
+    try:
+        payload = json.loads(response)
+    except ValueError:
+        return response
+    cookies = payload.get("cookies") if isinstance(payload, dict) else None
+    if not isinstance(cookies, list):
+        return response
+    for cookie in cookies:
+        if isinstance(cookie, dict):
+            cookie.pop("value", None)
+    payload["values_hidden"] = True
+    return json.dumps(payload) + "\n"
 
 
 def cmd_cookie_delete(argv: list[str]) -> None:

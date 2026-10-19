@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
 import stat
 import sys
 import tempfile
+import time
+from urllib.parse import urlsplit
 
 from src import ipc
 
@@ -74,6 +77,116 @@ def _status(args) -> dict:
 
 def _tabs(args) -> dict:
     return _json_response(args, "tabs")
+
+
+def _origin(url: str) -> str | None:
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+            return None
+        host = parsed.hostname.lower()
+        if ":" in host:
+            host = f"[{host}]"
+        port = parsed.port
+        suffix = f":{port}" if port and port != {"http": 80, "https": 443}[parsed.scheme] else ""
+        return f"{parsed.scheme}://{host}{suffix}"
+    except ValueError:
+        return None
+
+
+def _auth_evidence(url: str, expected: str | None) -> dict:
+    origin = _origin(url)
+    expected_origin = _origin(expected or "")
+    host = urlsplit(origin).hostname if origin else None
+    known = host in {"login.microsoftonline.com", "login.live.com", "login.microsoft.com",
+                     "weblogin.utoronto.ca", "idp.utoronto.ca", "login.utoronto.ca"}
+    changed = origin != expected_origin if origin and expected_origin else None
+    return {"state": ("authentication_redirect_evidence" if known and changed else
+                      "authentication_endpoint_observed" if known else "unknown"),
+            "current_origin": origin, "expected_origin": expected_origin,
+            "origin_changed": changed, "basis": "URL host only; not session validity or timeout cause"}
+
+
+def cmd_recover_session(argv: list[str]) -> None:
+    from src.session import recover
+    p = argparse.ArgumentParser(prog=f"{PROG} recover-session",
+        description="Offline exact-ID/context session recovery; writes a NEW candidate file only. Never connects to or changes a live browser.")
+    p.add_argument("--snapshot", required=True, help="Saved tabs --json snapshot")
+    p.add_argument("--state-source", required=True, help="Existing state file to preserve folders/settings/history")
+    p.add_argument("--output", required=True, help="New candidate file; must not exist and must not be the live state")
+    p.add_argument("--active-tab-id", type=int)
+    args = p.parse_args(argv)
+    try:
+        _print_json(recover(args.snapshot, args.state_source, args.output, args.active_tab_id))
+    except (OSError, ValueError, TypeError) as exc:
+        ipc.die(f"offline recovery refused: {exc}")
+
+
+def cmd_diagnose(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(prog=f"{PROG} diagnose", parents=[_parent(2.0)],
+        description="Read-only health and exact-tab metadata. Never wakes/focuses tabs or reads page/account content. Each probe has its own total deadline.")
+    p.add_argument("tab", type=int, help="Exact stable numeric tab ID")
+    p.add_argument("--expected-origin", help="Expected URL/origin for redirect evidence (no navigation)")
+    p.add_argument("--pretty", action="store_true")
+    args = p.parse_args(argv)
+    if args.tab <= 0:
+        p.error("tab ID must be positive")
+    path = str(ipc.socket_path(socket_override=args.socket, profile_dir=args.profile_dir))
+    result = {"schema": 1, "historical_timeout_cause": "unknown",
+              "mutation_retry": "never infer cancellation from a client timeout",
+              "renderer_readiness": "unknown_not_probed"}
+
+    def probe(command, socket_path):
+        began = time.monotonic()
+        try:
+            response = ipc.ensure_ok(ipc.send(command, socket_override=socket_path, timeout=args.timeout))
+            value = json.loads(response)
+            if not isinstance(value, dict):
+                raise ValueError("non-object response")
+            return {"responsive": True, "elapsed_ms": round((time.monotonic()-began)*1000), "data": value}
+        except ipc.IpcError as exc:
+            return {"responsive": False, "phase": exc.phase, "outcome": exc.outcome,
+                    "received_bytes": exc.received_bytes}
+        except (ValueError, json.JSONDecodeError):
+            return {"responsive": False, "phase": "protocol", "outcome": "unknown"}
+
+    result["daemon_socket"] = probe("health", path + ".health")
+    target = probe(f"diagnose-tab {args.tab}", path)
+    # Old browsers explicitly rejecting the read-only command get a read-only
+    # fallback. Never retry on timeout, and never fallback from a mutation.
+    if not target["responsive"] and target.get("phase") == "protocol":
+        legacy = probe("tabs", path)
+        if legacy["responsive"]:
+            payload = legacy["data"]
+            target = {**legacy, "data": {"tab": next((t for t in payload.get("tabs", [])
+                if t.get("id") == args.tab), None), "legacy_metadata": True}}
+    result["ui_queue"] = {k: v for k, v in target.items() if k != "data"}
+    if target["responsive"]:
+        data = target["data"]
+        tab = data.get("tab")
+        result["build"] = {k: data.get(k, "unknown") for k in ("shell_build", "control_backend_build")}
+        result["target"] = ({k: tab.get(k) for k in
+            ("id", "active", "loading", "activity_remaining_ms")} if tab else {"id": args.tab, "exists": False})
+        result["target"].update({k: data.get(k, "unknown") for k in ("browser_present", "main_frame_valid")})
+        # A lazy-restored tab exists even when it has no browser/main frame yet.
+        # Only native found-target metadata establishes existence here; legacy
+        # partial metadata, error payloads and mismatched IDs remain unknown.
+        if tab:
+            explicit_absence = data.get("exists") is False or tab.get("exists") is False
+            native_found = (
+                tab.get("id") == args.tab
+                and isinstance(tab.get("id"), int) and not isinstance(tab.get("id"), bool)
+                and all(isinstance(data.get(k), bool) for k in ("browser_present", "main_frame_valid"))
+                and data.get("ok") is not False and tab.get("ok") is not False
+                and "error" not in data and "error" not in tab
+                and not explicit_absence
+            )
+            result["target"]["exists"] = False if explicit_absence else True if native_found else "unknown"
+        result["auth"] = _auth_evidence(tab.get("url", "") if tab else "", args.expected_origin)
+    else:
+        result["target"] = {"id": args.tab, "exists": "unknown"}
+        result["auth"] = {"state": "unknown"}
+    _print_json(result, pretty=args.pretty)
 
 
 def _looks_like_tab_spec(value: str) -> bool:
@@ -388,12 +501,16 @@ def cmd_open_context(argv: list[str]) -> None:
         ),
     )
     _open_folder_option(p)
+    p.add_argument("--brief", action="store_true",
+                   help="Return only the created tab (requires new browser; no mutation retry/fallback)")
     p.add_argument("context", help="Context name (lowercase letters, numbers, '_', and '-')")
     p.add_argument("target", nargs=argparse.REMAINDER,
                    help="URL, search query, or local path")
     args = p.parse_args(argv)
     target = _joined_tail(args.target, "target", p)
-    command = "open-background-context-tab"
+    if args.brief and args.folder is not None:
+        p.error("--brief cannot be combined with --folder")
+    command = "open-background-context-tab-brief" if args.brief else "open-background-context-tab"
     if args.folder is not None:
         command += f"-in-folder {args.folder}"
     print(_send(args, f"{command} {args.context} {target}"), end="")
@@ -574,6 +691,18 @@ def cmd_html(argv: list[str]) -> None:
 def cmd_text(argv: list[str]) -> None:
     _single_optional_tab_command(argv, name="text", ipc_name="text",
                                  description="Dump current document text for a tab")
+
+
+def cmd_activity(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(prog=f"{PROG} activity", parents=[_parent()],
+                                description="Lease background page rendering without native focus")
+    p.add_argument("tab", help="Stable tab ID or tab alias")
+    p.add_argument("milliseconds", type=int,
+                   help="0 releases; 1..300000 leases (page IPC automatically renews 60000ms)")
+    args = p.parse_args(argv)
+    if not 0 <= args.milliseconds <= 300000:
+        p.error("milliseconds must be between 0 and 300000")
+    print(_send(args, f"tab-activity {_resolve_tab(args, args.tab)} {args.milliseconds}"))
 
 
 def cmd_screenshot(argv: list[str]) -> None:
@@ -885,8 +1014,32 @@ def cmd_network(argv: list[str]) -> None:
     if not args.parts:
         p.error("missing network arguments")
     parts = list(args.parts)
+    output = None
+    if "--output" in parts:
+        if (len(parts) != 5 or parts[1] != "body" or parts[3] != "--output"
+                or not parts[2].isdigit()):
+            p.error("binary output usage: network TAB body REQUEST_ID --output PATH")
+        output = Path(parts[4]).expanduser()
+        if output.exists():
+            p.error("output path already exists; choose a new file")
+        parts = parts[:3]
     if _looks_like_tab_spec(parts[0]):
         parts[0] = _resolve_tab(args, parts[0])
+    if output is not None:
+        try:
+            data = ipc.send_bytes(
+                "network " + " ".join(parts),
+                socket_override=args.socket, profile_dir=args.profile_dir,
+                timeout=args.timeout)
+            if data.startswith(b"ERR "):
+                raise ipc.IpcError(data.decode("utf-8", errors="replace").rstrip())
+            with output.open("xb") as f:
+                f.write(data)
+        except (ipc.IpcError, OSError) as exc:
+            ipc.die(str(exc))
+        _print_json({"saved": str(output), "bytes": len(data),
+                     "sha256": hashlib.sha256(data).hexdigest()})
+        return
     print(_send(args, "network " + " ".join(parts)), end="")
 
 

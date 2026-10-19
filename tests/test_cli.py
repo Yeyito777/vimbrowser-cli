@@ -56,6 +56,25 @@ class OneShotServer:
 
 
 class CliExitTests(unittest.TestCase):
+    def test_activity_exact_tab_lease_and_release(self) -> None:
+        for duration in (0, 60000, 300000):
+            with self.subTest(duration=duration), tempfile.TemporaryDirectory() as tmp:
+                with OneShotServer(Path(tmp), b"OK\n") as server:
+                    result = subprocess.run(
+                        [str(CLI), "activity", "42", str(duration),
+                         "--socket", str(server.path)],
+                        capture_output=True, text=True, timeout=2)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(server.command, f"tab-activity 42 {duration}\n".encode())
+
+    def test_activity_rejects_unbounded_duration_without_connecting(self) -> None:
+        for duration in (-1, 300001):
+            result = subprocess.run(
+                [str(CLI), "activity", "42", str(duration), "--socket", "/nonexistent"],
+                capture_output=True, text=True, timeout=2)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("milliseconds must be between", result.stderr)
+
     def test_help_exits(self) -> None:
         result = subprocess.run(
             [str(CLI), "-h"],

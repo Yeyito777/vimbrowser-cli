@@ -17,6 +17,8 @@ usage() {
 usage: vimbrowser-cli <command> [args]
 
 commands:
+  recover-session Offline exact-ID/context recovery into a NEW candidate state
+  diagnose     Read-only transport/UI/target/auth evidence; timeout ambiguity
   status       Show active browser/tab state as JSON
   protocol     Show IPC protocol metadata
   version      Alias for protocol
@@ -46,6 +48,7 @@ commands:
   html         Dump current full document HTML for a tab
   text         Dump current document text for a tab
   screenshot   Capture a tab screenshot as PNG
+  activity     Lease background rendering for 0..300000ms (0 releases)
   frame-tree   List the exact main/child frame tree for a tab
   frame-html   Dump HTML from one exact frame
   frame-text   Dump text from one exact frame
@@ -95,7 +98,7 @@ fi
 cmd="$1"; shift
 
 case "$cmd" in
-    status|protocol|version|commands|browser-help|tabs|current-tab|focus|tab-order|open|open-context|load|close-tab|reload|reload-ignore-cache|back|forward|stop|zoom|scroll|scroll-tab|url|fps|refresh|js|js-file|html|text|screenshot|frame-tree|frame-html|frame-text|frame-js|inspect-controls|activate-control|upload-file|upload-file-status|upload-file-cancel|shader|showfps|network|network-execute|cookies|cookie-delete|cookie-set|raw)
+    recover-session|diagnose|status|protocol|version|commands|browser-help|tabs|current-tab|focus|tab-order|open|open-context|load|close-tab|reload|reload-ignore-cache|back|forward|stop|zoom|scroll|scroll-tab|url|fps|refresh|js|js-file|html|text|screenshot|activity|frame-tree|frame-html|frame-text|frame-js|inspect-controls|activate-control|upload-file|upload-file-status|upload-file-cancel|shader|showfps|network|network-execute|cookies|cookie-delete|cookie-set|raw)
         pyfn="cmd_${cmd//-/_}"
         exec "$PYTHON" -c "import sys; from src.commands import $pyfn; $pyfn(sys.argv[1:])" "$@" ;;
     help|--help|-h)

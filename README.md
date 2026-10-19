@@ -16,21 +16,36 @@ vimbrowser-cli/
 
 No third-party Python dependencies are required; it uses the system `python3` unless a local `.venv/bin/python3` exists.
 
-## Bash tool timeout units
+## Diagnostics and timeout units
 
-When invoking this CLI through Exocortex's `bash` tool, its `timeout` field is
-in **milliseconds**. Use `30000` for a 30-second outer timeout, not `30`.
-Python-backed commands normally take tens of milliseconds just to start, so a
-value such as `30` can terminate an otherwise successful invocation after it
-has already received and printed its IPC response. This produces a misleading
-message such as `command timed out after 0.1s` followed by `SIGTERM`.
+`vimbrowser-cli diagnose TAB --expected-origin https://outlook.office.com --pretty`
+separates independent daemon/socket health, the serial UI queue, exact target
+metadata, build identity, URL-host authentication evidence and in-flight/timeout
+ambiguity. It never wakes/focuses tabs, reads page/account content, or signs in.
+Renderer readiness and historical timeout cause remain unknown unless separately
+established; valid frame metadata is not a renderer responsiveness probe. URLs
+are reduced to origins, without titles, query tokens or unrelated tabs.
 
-Wrapping the command in coreutils `timeout 5s ...` does not override a shorter
-outer `bash` tool timeout.
+The new browser exposes an independent mode-0600 `ipc.sock.health` endpoint with
+latest/last-16 operation metadata (not arguments/content). Old browsers can use
+read-only metadata fallback but cannot provide this independent queue evidence.
+A client disconnect before dispatch can skip a queued command; after dispatch,
+closure/timeouts are not rollback. **Never blindly retry a mutation.**
+
+CLI `--timeout` is a total deadline in **seconds**, including partial reads.
+Transport errors distinguish connect/not-sent from send/receive/outcome-unknown.
+Check the outer tool's schema separately: `timeout_seconds` is seconds. An inner
+coreutils timeout does not override a shorter outer tool deadline.
+
+`open-context --brief CONTEXT URL` returns only `{ok,tab}` for the exact newly
+created tab. This is opt-in to preserve existing full-state consumers and requires
+the new browser; no automatic mutation fallback is attempted.
 
 ## Socket resolution
 
-Commands connect to the first available socket in this order:
+Explicit flags/environment targets are authoritative even when missing (they
+never fall through to the owner's live profile). Otherwise discovery uses the
+first available default socket. Precedence:
 
 1. `--socket PATH`
 2. `--profile-dir DIR` → `DIR/ipc.sock`
@@ -73,6 +88,8 @@ vimbrowser-cli js-file @active /tmp/script.js
 vimbrowser-cli html @active
 vimbrowser-cli text @active
 vimbrowser-cli screenshot @active -o /tmp/tab.png
+vimbrowser-cli activity 3 300000   # extend background rendering for a long auth wait
+vimbrowser-cli activity 3 0        # release when finished
 vimbrowser-cli frame-tree @active --pretty
 vimbrowser-cli frame-text @active FRAME_ID
 printf '%s' 'document.title' | vimbrowser-cli frame-js @active FRAME_ID
@@ -94,6 +111,7 @@ vimbrowser-cli cookie-set @active debug true
 vimbrowser-cli network @active capture on https://mail.example.test/sync/
 vimbrowser-cli network @active wait https://mail.example.test/sync/ 15000
 vimbrowser-cli network @active list
+vimbrowser-cli network @active body 42 --output /tmp/download.pdf
 printf '%s' "$request_json" | vimbrowser-cli network-execute @active
 printf '%s' 'status' | vimbrowser-cli raw
 ```
@@ -116,6 +134,11 @@ bodies, dynamic URLs, or header values in OS process arguments.
 payload arguments are rejected before connecting to the browser.
 
 ### Context-bound network broker
+
+`network TAB body REQUEST_ID --output PATH` saves the exact captured response
+bytes without UTF-8 decoding or another network request. It refuses an existing
+output file and prints only byte count/path/hash. Use this for binary payloads;
+the legacy stdout body mode is for text.
 
 `network TAB capture on [URL_PREFIX]` dynamically enables native request capture
 for one exact tab. `capture status` reports the filter and latest request-ID
@@ -250,6 +273,16 @@ This uses the additive `open-background-tab-in-folder` and
 `open-background-context-tab-in-folder` IPC commands. Invalid/missing folders
 fail without creating a tab. Older browsers reject these command names; the CLI
 never silently falls back to opening in the wrong folder or opening then moving.
+
+Recent browser builds automatically lease 60 seconds of background activity for
+page-directed IPC: JS/rAF, rendering, frame controls, uploads, navigation and
+screenshots work without native focus. `activity TAB MILLISECONDS` explicitly
+sets a lease (1..300000ms), or releases it (0). Extend it before long auth waits;
+release it when done. Popups inherit the remaining lease. Blink visibility/focus
+is emulated only for leased pages; the owner's native focus and selected tab are
+unchanged. Status/tab/network/cookie metadata reads do not renew activity, and
+`tabs --json` exposes `activity_remaining_ms`. Requires the browser IPC command
+`tab-activity`; installing only this CLI cannot fix an already-running old browser.
 
 ## Validation
 

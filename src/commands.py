@@ -907,6 +907,185 @@ def cmd_activate_control(argv: list[str]) -> None:
         raise SystemExit(1)
 
 
+POINTER_MAX_STEPS = 256
+POINTER_MAX_DELAY_MS = 5000
+POINTER_MAX_TOTAL_MS = 15000
+POINTER_FRAME_MS = 16
+KEY_NAMES = ("Enter", "Tab", "Backspace", "Delete", "Escape", "Space", "ArrowLeft",
+             "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End")
+
+
+def _offset(value: str) -> tuple[float, float]:
+    """Parse 'DX,DY' (CSS px from the inspected node's visible-box centre)."""
+    try:
+        x_text, y_text = value.split(",")
+        x, y = float(x_text), float(y_text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected DX,DY, got {value!r}") from exc
+    if not (abs(x) <= 4096 and abs(y) <= 4096):
+        raise argparse.ArgumentTypeError("offsets must be finite and within 4096 px")
+    return x, y
+
+
+def _handle_arg(p: argparse.ArgumentParser, handle: str) -> str:
+    if (not handle.startswith("eh1_") or len(handle.encode("utf-8")) > MAX_HANDLE_BYTES
+            or any(character.isspace() for character in handle)):
+        p.error("handle is malformed")
+    return handle
+
+
+def _step(kind: str, point: tuple[float, float], delay_ms: int = 0) -> dict:
+    return {"type": kind, "x": round(point[0], 2), "y": round(point[1], 2),
+            "delay_ms": int(delay_ms)}
+
+
+def _click_steps(at: tuple[float, float], hold_ms: int) -> list[dict]:
+    return [_step("move", at), _step("down", at, 20), _step("up", at, hold_ms)]
+
+
+def _drag_steps(points: list[tuple[float, float]], duration_ms: int) -> list[dict]:
+    """Press at points[0], move through the polyline in ~60 Hz steps over
+    duration_ms, release at points[-1]."""
+    lengths = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
+               for a, b in zip(points, points[1:])]
+    total = sum(lengths) or 1.0
+    count = max(2, min(POINTER_MAX_STEPS - 4, round(duration_ms / POINTER_FRAME_MS)))
+    delay = max(1, round(duration_ms / count))
+    steps = [_step("move", points[0]), _step("down", points[0], 30)]
+    for i in range(1, count + 1):
+        target = total * i / count
+        walked = 0.0
+        for (a, b), length in zip(zip(points, points[1:]), lengths):
+            if walked + length >= target or (a, b) == (points[-2], points[-1]):
+                t = 0.0 if length == 0 else min(1.0, (target - walked) / length)
+                steps.append(_step("move", (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t), delay))
+                break
+            walked += length
+    steps.append(_step("up", points[-1], 30))
+    return steps
+
+
+def _validate_steps(p: argparse.ArgumentParser, steps) -> None:
+    if not isinstance(steps, list) or not 1 <= len(steps) <= POINTER_MAX_STEPS:
+        p.error(f"steps must be a JSON list of 1 to {POINTER_MAX_STEPS} steps")
+    total = 0
+    for step in steps:
+        if (not isinstance(step, dict) or step.get("type") not in {"move", "down", "up"}
+                or not all(isinstance(step.get(k), (int, float)) for k in ("x", "y"))):
+            p.error("each step needs type move|down|up and numeric x, y")
+        delay = step.get("delay_ms", 0)
+        if not isinstance(delay, int) or not 0 <= delay <= POINTER_MAX_DELAY_MS:
+            p.error(f"delay_ms must be an integer from 0 to {POINTER_MAX_DELAY_MS}")
+        total += delay
+    if total > POINTER_MAX_TOTAL_MS:
+        p.error(f"a gesture may last at most {POINTER_MAX_TOTAL_MS} ms")
+
+
+def _send_input(args, p, command: str, payload: dict) -> None:
+    token = base64.b64encode(
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).decode("ascii")
+    reply = _json_response(args, f"{command} {_resolve_tab(args, args.tab)} {token}",
+                           label=command)
+    _print_json(reply, pretty=args.pretty)
+    if reply.get("ok") is not True:
+        raise SystemExit(1)
+
+
+def cmd_pointer(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} pointer", parents=[_parent(20.0)],
+        description=(
+            "Trusted mouse click or drag at CSS-pixel offsets from the centre of one "
+            "exact inspected node (a handle from inspect-controls)"
+        ),
+        epilog=(
+            "Offsets DX,DY are CSS px from the centre of the node's visible box (the "
+            "point activate-control clicks). The browser consumes HANDLE once, "
+            "hit-tests every step against the exact frame in the compositor and, for "
+            "click, against the exact node in Blink. A drag must press on the node; "
+            "with --frame-bound the rest of the path may cross the node's frame. "
+            "A failed gesture is never retried and a held button is released."
+        ),
+    )
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("handle", help="Exact eh1_ handle returned by inspect-controls")
+    p.add_argument("action", choices=["click", "drag", "steps"],
+                   help="click, drag, or steps (raw JSON step list on stdin)")
+    p.add_argument("--at", type=_offset, default=(0.0, 0.0),
+                   help="click: DX,DY offset (default 0,0, the node centre)")
+    p.add_argument("--hold", type=int, default=60, help="click: press duration in ms")
+    p.add_argument("--from", dest="start", type=_offset, default=(0.0, 0.0),
+                   help="drag: press point DX,DY (default 0,0)")
+    p.add_argument("--to", type=_offset, help="drag: release point DX,DY")
+    p.add_argument("--via", type=_offset, action="append", default=[],
+                   help="drag: intermediate DX,DY waypoint (repeatable)")
+    p.add_argument("--duration", type=int, default=600,
+                   help="drag: total movement time in ms (default 600)")
+    p.add_argument("--frame-bound", action="store_true",
+                   help="drag/steps: after the press, allow the path anywhere in the node's frame")
+    p.add_argument("--pretty", action="store_true", help="Pretty-print response JSON")
+    args, extras = p.parse_known_args(argv)
+    handle = _handle_arg(p, args.handle)
+    if args.action == "steps":
+        _reject_inline_payload(p, extras, "pointer steps JSON")
+        try:
+            steps = json.loads(_stdin_payload(p, "pointer steps JSON"))
+        except json.JSONDecodeError as exc:
+            p.error(f"steps JSON is invalid: {exc}")
+    else:
+        if extras:
+            p.error(f"unrecognized arguments: {' '.join(extras)}")
+        if args.action == "click":
+            if not 0 <= args.hold <= POINTER_MAX_DELAY_MS:
+                p.error(f"--hold must be 0 to {POINTER_MAX_DELAY_MS} ms")
+            steps = _click_steps(args.at, args.hold)
+        else:
+            if args.to is None:
+                p.error("drag needs --to DX,DY")
+            if not 50 <= args.duration <= 10000:
+                p.error("--duration must be 50 to 10000 ms")
+            steps = _drag_steps([args.start, *args.via, args.to], args.duration)
+    _validate_steps(p, steps)
+    _send_input(args, p, "pointer-gesture", {
+        "version": 1, "handle": handle, "bound": "frame" if args.frame_bound else "node",
+        "steps": steps})
+
+
+def cmd_key_input(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} key-input", parents=[_parent(20.0)],
+        description=(
+            "Trusted key events into the focused frame of one exact inspected node: "
+            "printable text from stdin, or one named key"
+        ),
+        epilog=(
+            "The node's frame must be the tab's focused frame (click the field first). "
+            "Keys reach only the page, never vimbrowser's own bindings. One trailing "
+            "newline on stdin is dropped; send Enter with --key Enter."
+        ),
+    )
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("handle", help="Exact eh1_ handle returned by inspect-controls")
+    p.add_argument("--key", choices=KEY_NAMES, help="Send one named key instead of text")
+    p.add_argument("--pretty", action="store_true", help="Pretty-print response JSON")
+    args, extras = p.parse_known_args(argv)
+    handle = _handle_arg(p, args.handle)
+    payload = {"version": 1, "handle": handle}
+    if args.key:
+        if extras:
+            p.error(f"unrecognized arguments: {' '.join(extras)}")
+        payload["key"] = args.key
+    else:
+        _reject_inline_payload(p, extras, "text")
+        text = _stdin_payload(p, "text")
+        text = text[:-1] if text.endswith("\n") else text
+        if not text or len(text) > 256 or any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+            p.error("text must be 1 to 256 printable characters")
+        payload["text"] = text
+    _send_input(args, p, "key-input", payload)
+
+
 def cmd_upload_file(argv: list[str]) -> None:
     p = argparse.ArgumentParser(
         prog=f"{PROG} upload-file",

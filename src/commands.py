@@ -915,22 +915,22 @@ KEY_NAMES = ("Enter", "Tab", "Backspace", "Delete", "Escape", "Space", "ArrowLef
              "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End")
 
 
-def _offset(value: str) -> tuple[float, float]:
-    """Parse 'DX,DY' (CSS px from the inspected node's visible-box centre)."""
+def _point(value: str) -> tuple[float, float]:
+    """Parse 'X,Y': CSS px in the tab's main viewport."""
     try:
         x_text, y_text = value.split(",")
         x, y = float(x_text), float(y_text)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"expected DX,DY, got {value!r}") from exc
-    if not (abs(x) <= 4096 and abs(y) <= 4096):
-        raise argparse.ArgumentTypeError("offsets must be finite and within 4096 px")
+        raise argparse.ArgumentTypeError(f"expected X,Y, got {value!r}") from exc
+    if not (0 <= x <= 100000 and 0 <= y <= 100000):
+        raise argparse.ArgumentTypeError("points must be finite, non-negative viewport CSS px")
     return x, y
 
 
-def _handle_arg(p: argparse.ArgumentParser, handle: str) -> str:
-    if (not handle.startswith("eh1_") or len(handle.encode("utf-8")) > MAX_HANDLE_BYTES
+def _region_handle(p: argparse.ArgumentParser, handle: str) -> str:
+    if (not handle.startswith("ph1_") or len(handle) != 36
             or any(character.isspace() for character in handle)):
-        p.error("handle is malformed")
+        p.error("handle is malformed (expected a ph1_ handle from input-region)")
     return handle
 
 
@@ -946,17 +946,16 @@ def _click_steps(at: tuple[float, float], hold_ms: int) -> list[dict]:
 def _drag_steps(points: list[tuple[float, float]], duration_ms: int) -> list[dict]:
     """Press at points[0], move through the polyline in ~60 Hz steps over
     duration_ms, release at points[-1]."""
-    lengths = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
-               for a, b in zip(points, points[1:])]
+    segments = list(zip(points, points[1:]))
+    lengths = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5 for a, b in segments]
     total = sum(lengths) or 1.0
     count = max(2, min(POINTER_MAX_STEPS - 4, round(duration_ms / POINTER_FRAME_MS)))
     delay = max(1, round(duration_ms / count))
     steps = [_step("move", points[0]), _step("down", points[0], 30)]
     for i in range(1, count + 1):
-        target = total * i / count
-        walked = 0.0
-        for (a, b), length in zip(zip(points, points[1:]), lengths):
-            if walked + length >= target or (a, b) == (points[-2], points[-1]):
+        target, walked = total * i / count, 0.0
+        for (a, b), length in zip(segments, lengths):
+            if walked + length >= target - 1e-9 or (a, b) == segments[-1]:
                 t = 0.0 if length == 0 else min(1.0, (target - walked) / length)
                 steps.append(_step("move", (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t), delay))
                 break
@@ -981,7 +980,7 @@ def _validate_steps(p: argparse.ArgumentParser, steps) -> None:
         p.error(f"a gesture may last at most {POINTER_MAX_TOTAL_MS} ms")
 
 
-def _send_input(args, p, command: str, payload: dict) -> None:
+def _send_input(args, command: str, payload: dict) -> None:
     token = base64.b64encode(
         json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     ).decode("ascii")
@@ -992,41 +991,65 @@ def _send_input(args, p, command: str, payload: dict) -> None:
         raise SystemExit(1)
 
 
+def cmd_input_region(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} input-region", parents=[_parent(20.0)],
+        description=(
+            "Mint a 15-second one-shot handle for trusted pointer/key input at one "
+            "viewport point of one exact frame"
+        ),
+        epilog=(
+            "The browser resolves what is under X,Y through its own DevTools session, "
+            "requires it to belong to FRAME (from frame-tree), and binds the handle to "
+            "that element's box and the frame's visible box. Inside a cross-process "
+            "iframe it can only bind to the iframe as a whole."
+        ),
+    )
+    p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
+    p.add_argument("--frame", required=True, help="Opaque frame ID returned by frame-tree")
+    p.add_argument("--at", type=_point, required=True,
+                   help="X,Y in CSS px of the tab's main viewport")
+    p.add_argument("--pretty", action="store_true", help="Pretty-print response JSON")
+    args = p.parse_args(argv)
+    if not args.frame or len(args.frame) > 256:
+        p.error("frame is invalid")
+    _send_input(args, "input-region", {"version": 1, "frame_id": args.frame,
+                                       "x": args.at[0], "y": args.at[1]})
+
+
 def cmd_pointer(argv: list[str]) -> None:
     p = argparse.ArgumentParser(
         prog=f"{PROG} pointer", parents=[_parent(20.0)],
         description=(
-            "Trusted mouse click or drag at CSS-pixel offsets from the centre of one "
-            "exact inspected node (a handle from inspect-controls)"
+            "Trusted mouse click or drag at viewport points, bounded to the element "
+            "(or frame) of one input-region handle"
         ),
         epilog=(
-            "Offsets DX,DY are CSS px from the centre of the node's visible box (the "
-            "point activate-control clicks). The browser consumes HANDLE once, "
-            "hit-tests every step against the exact frame in the compositor and, for "
-            "click, against the exact node in Blink. A drag must press on the node; "
-            "with --frame-bound the rest of the path may cross the node's frame. "
-            "A failed gesture is never retried and a held button is released."
+            "Points are CSS px of the tab's main viewport. The browser consumes HANDLE "
+            "once and, before every step, requires the point to lie in the bound "
+            "element's box and DevTools hit testing to return that same element. A "
+            "drag's press is element-bound; with --frame-bound the rest of the path may "
+            "move anywhere inside the same frame. A refused gesture is never retried "
+            "and a held button is released."
         ),
     )
     p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
-    p.add_argument("handle", help="Exact eh1_ handle returned by inspect-controls")
+    p.add_argument("handle", help="ph1_ handle returned by input-region")
     p.add_argument("action", choices=["click", "drag", "steps"],
                    help="click, drag, or steps (raw JSON step list on stdin)")
-    p.add_argument("--at", type=_offset, default=(0.0, 0.0),
-                   help="click: DX,DY offset (default 0,0, the node centre)")
+    p.add_argument("--at", type=_point, help="click: X,Y (usually the input-region point)")
     p.add_argument("--hold", type=int, default=60, help="click: press duration in ms")
-    p.add_argument("--from", dest="start", type=_offset, default=(0.0, 0.0),
-                   help="drag: press point DX,DY (default 0,0)")
-    p.add_argument("--to", type=_offset, help="drag: release point DX,DY")
-    p.add_argument("--via", type=_offset, action="append", default=[],
-                   help="drag: intermediate DX,DY waypoint (repeatable)")
+    p.add_argument("--from", dest="start", type=_point, help="drag: press point X,Y")
+    p.add_argument("--to", type=_point, help="drag: release point X,Y")
+    p.add_argument("--via", type=_point, action="append", default=[],
+                   help="drag: intermediate X,Y waypoint (repeatable)")
     p.add_argument("--duration", type=int, default=600,
                    help="drag: total movement time in ms (default 600)")
     p.add_argument("--frame-bound", action="store_true",
-                   help="drag/steps: after the press, allow the path anywhere in the node's frame")
+                   help="drag/steps: after the press, allow the path anywhere in the frame")
     p.add_argument("--pretty", action="store_true", help="Pretty-print response JSON")
     args, extras = p.parse_known_args(argv)
-    handle = _handle_arg(p, args.handle)
+    handle = _region_handle(p, args.handle)
     if args.action == "steps":
         _reject_inline_payload(p, extras, "pointer steps JSON")
         try:
@@ -1037,18 +1060,20 @@ def cmd_pointer(argv: list[str]) -> None:
         if extras:
             p.error(f"unrecognized arguments: {' '.join(extras)}")
         if args.action == "click":
+            if args.at is None:
+                p.error("click needs --at X,Y")
             if not 0 <= args.hold <= POINTER_MAX_DELAY_MS:
                 p.error(f"--hold must be 0 to {POINTER_MAX_DELAY_MS} ms")
             steps = _click_steps(args.at, args.hold)
         else:
-            if args.to is None:
-                p.error("drag needs --to DX,DY")
+            if args.start is None or args.to is None:
+                p.error("drag needs --from X,Y and --to X,Y")
             if not 50 <= args.duration <= 10000:
                 p.error("--duration must be 50 to 10000 ms")
             steps = _drag_steps([args.start, *args.via, args.to], args.duration)
     _validate_steps(p, steps)
-    _send_input(args, p, "pointer-gesture", {
-        "version": 1, "handle": handle, "bound": "frame" if args.frame_bound else "node",
+    _send_input(args, "pointer-gesture", {
+        "version": 1, "handle": handle, "bound": "frame" if args.frame_bound else "element",
         "steps": steps})
 
 
@@ -1056,21 +1081,22 @@ def cmd_key_input(argv: list[str]) -> None:
     p = argparse.ArgumentParser(
         prog=f"{PROG} key-input", parents=[_parent(20.0)],
         description=(
-            "Trusted key events into the focused frame of one exact inspected node: "
-            "printable text from stdin, or one named key"
+            "Trusted key events into the frame of one input-region handle: printable "
+            "text from stdin, or one named key"
         ),
         epilog=(
-            "The node's frame must be the tab's focused frame (click the field first). "
+            "Mint the handle on the field. Its frame must be the tab's focused frame "
+            "(click the field first) and the field must still be under the minted point. "
             "Keys reach only the page, never vimbrowser's own bindings. One trailing "
             "newline on stdin is dropped; send Enter with --key Enter."
         ),
     )
     p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
-    p.add_argument("handle", help="Exact eh1_ handle returned by inspect-controls")
+    p.add_argument("handle", help="ph1_ handle returned by input-region")
     p.add_argument("--key", choices=KEY_NAMES, help="Send one named key instead of text")
     p.add_argument("--pretty", action="store_true", help="Pretty-print response JSON")
     args, extras = p.parse_known_args(argv)
-    handle = _handle_arg(p, args.handle)
+    handle = _region_handle(p, args.handle)
     payload = {"version": 1, "handle": handle}
     if args.key:
         if extras:
@@ -1083,7 +1109,7 @@ def cmd_key_input(argv: list[str]) -> None:
         if not text or len(text) > 256 or any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
             p.error("text must be 1 to 256 printable characters")
         payload["text"] = text
-    _send_input(args, p, "key-input", payload)
+    _send_input(args, "key-input", payload)
 
 
 def cmd_upload_file(argv: list[str]) -> None:

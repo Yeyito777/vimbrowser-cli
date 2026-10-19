@@ -95,11 +95,12 @@ vimbrowser-cli frame-text @active FRAME_ID
 printf '%s' 'document.title' | vimbrowser-cli frame-js @active FRAME_ID
 vimbrowser-cli inspect-controls @active --frame FRAME_ID --role button --name-exact Browse --require-one --pretty
 vimbrowser-cli activate-control @active eh1_INSPECTED_TARGET
-vimbrowser-cli pointer @active eh1_INSPECTED_TARGET click --at 40,-12 --hold 80
-vimbrowser-cli pointer @active eh1_INSPECTED_TARGET drag --to 180,0 --via 90,4 --duration 700 --frame-bound
-printf '%s' "$steps_json" | vimbrowser-cli pointer @active eh1_INSPECTED_TARGET steps
-printf '%s' 'W7KQ' | vimbrowser-cli key-input @active eh1_FOCUSED_FIELD
-vimbrowser-cli key-input @active eh1_FOCUSED_FIELD --key Enter
+vimbrowser-cli input-region @active --frame FRAME_ID --at 412,318
+vimbrowser-cli pointer @active ph1_REGION_HANDLE click --at 412,318 --hold 80
+vimbrowser-cli pointer @active ph1_REGION_HANDLE drag --from 412,318 --to 590,318 --via 500,322 --frame-bound
+printf '%s' "$steps_json" | vimbrowser-cli pointer @active ph1_REGION_HANDLE steps
+printf '%s' 'W7KQ' | vimbrowser-cli key-input @active ph1_FIELD_HANDLE
+vimbrowser-cli key-input @active ph1_FIELD_HANDLE --key Enter
 vimbrowser-cli upload-file @active '#attachment' /home/me/report.pdf
 vimbrowser-cli upload-file @active index:1 /tmp/front.png /tmp/back.png
 vimbrowser-cli upload-file @active 'activate:#browse-button' /home/me/resume.pdf
@@ -265,24 +266,29 @@ native click. Use it for a uniquely inspected control whose handler requires a
 real interaction, such as “Log in with Google.” It deliberately has no selector,
 coordinate, or arbitrary-script mode; plain DOM `.click()` remains untrusted.
 
-`pointer TAB HANDLE click|drag|steps` sends one trusted mouse gesture anchored
-on an inspected node, for targets where the press position matters (canvas
-challenges, image grids, sliders). `--at`, `--from`, `--to` and `--via` take
-`DX,DY` in CSS px from the centre of the node's visible box; `drag` interpolates
-the path at ~60 Hz over `--duration`; `steps` reads the raw
-`[{"type":"move|down|up","x":..,"y":..,"delay_ms":..}]` list from stdin. The
-browser consumes the handle once and, before every step, proves through its
-compositor that the point is inside the node's exact frame and uncovered, and
-through Blink that it hits the node itself. A drag's press must hit the node;
-`--frame-bound` lets the rest of the path move anywhere inside the same frame.
-A refused gesture stops without retry (a held button is released) and reports
-`dispatched_steps`. There are still no screen or viewport coordinates.
+`input-region TAB --frame FRAME --at X,Y` mints a `ph1_` handle (15 s,
+one-shot) for trusted input at one point of one exact frame (X,Y in CSS px of
+the tab's main viewport). The browser resolves what is under the point through
+its own DevTools session, refuses it unless it belongs to FRAME, and binds the
+handle to that element's box and the frame's visible box. Inside an
+out-of-process iframe it can only bind to the iframe as a whole.
+
+`pointer TAB HANDLE click|drag|steps` sends one trusted mouse gesture at
+viewport points (`--at`, `--from`, `--to`, `--via`); `drag` interpolates the
+path at ~60 Hz over `--duration`; `steps` reads the raw
+`[{"type":"move|down|up","x":..,"y":..,"delay_ms":..}]` list from stdin. Before
+every step the browser requires the point to be inside the bound element (or,
+after a `--frame-bound` drag's press, inside the bound frame) and a fresh
+DevTools hit test to return that same element, so covered or out-of-region
+points are refused. A refused gesture stops without retry (a held button is
+released) and reports `dispatched_steps`. In a tab that is not displayed, each
+mouse event can take about a second.
 
 `key-input TAB HANDLE` types printable text from stdin (one trailing newline is
 dropped) or sends `--key NAME` (Enter, Tab, Backspace, Delete, Escape, Space,
-arrows, Home, End) as trusted key events into the handle's frame, which must be
-the tab's focused frame; press the field with `pointer` first. Keys reach only
-the page, never vimbrowser's own bindings.
+arrows, Home, End) as trusted key events. Mint the handle on the field; its
+frame must be the tab's focused frame, so press the field with `pointer` first.
+Keys reach only the page, never vimbrowser's own bindings.
 
 `open` and `open-context` always create background tabs. `focus` is the only
 named CLI command that selects another tab. `open-context NAME TARGET` backs the

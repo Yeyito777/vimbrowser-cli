@@ -371,60 +371,66 @@ class UploadFileTests(unittest.TestCase):
         payload = json.loads(base64.b64decode(command[2])) if len(command) == 3 else None
         return result, command, payload
 
-    def test_pointer_click_encodes_offset_steps(self) -> None:
-        handle = "eh1_exact-canvas"
+    def test_input_region_encodes_frame_and_point(self) -> None:
         result, command, payload = self._input_command(
-            "pointer", "7", handle, "click", "--at", "12.5,-4", "--hold", "90")
+            "input-region", "7", "--frame", "5-ABC", "--at", "120.5,40")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(command[:2], ["input-region", "7"])
+        self.assertEqual(payload, {"version": 1, "frame_id": "5-ABC", "x": 120.5, "y": 40.0})
+
+    def test_pointer_click_encodes_viewport_steps(self) -> None:
+        handle = "ph1_0123456789abcdef0123456789abcdef"
+        result, command, payload = self._input_command(
+            "pointer", "7", handle, "click", "--at", "212.5,96", "--hold", "90")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(command[:2], ["pointer-gesture", "7"])
         self.assertEqual(payload["handle"], handle)
-        self.assertEqual(payload["bound"], "node")
+        self.assertEqual(payload["bound"], "element")
         self.assertEqual([(s["type"], s["x"], s["y"]) for s in payload["steps"]],
-                         [("move", 12.5, -4.0), ("down", 12.5, -4.0), ("up", 12.5, -4.0)])
+                         [("move", 212.5, 96.0), ("down", 212.5, 96.0), ("up", 212.5, 96.0)])
         self.assertEqual(payload["steps"][-1]["delay_ms"], 90)
 
     def test_pointer_drag_interpolates_a_frame_bound_path(self) -> None:
         result, _, payload = self._input_command(
-            "pointer", "7", "eh1_knob", "drag", "--to", "160,0", "--via", "80,6",
-            "--duration", "480", "--frame-bound")
+            "pointer", "7", "ph1_0123456789abcdef0123456789abcdef", "drag", "--from", "100,50", "--to", "260,50",
+            "--via", "180,56", "--duration", "480", "--frame-bound")
         self.assertEqual(result.returncode, 0, result.stderr)
         steps = payload["steps"]
         self.assertEqual(payload["bound"], "frame")
         self.assertEqual([s["type"] for s in steps[:2]], ["move", "down"])
         self.assertEqual(steps[-1]["type"], "up")
-        self.assertEqual((steps[-1]["x"], steps[-1]["y"]), (160.0, 0.0))
+        self.assertEqual((steps[-1]["x"], steps[-1]["y"]), (260.0, 50.0))
         self.assertGreaterEqual(len(steps), 30)
         self.assertTrue(all(s["type"] == "move" for s in steps[2:-1]))
 
-    def test_pointer_steps_from_stdin_are_validated_before_ipc(self) -> None:
-        bad = subprocess.run(
-            [str(CLI), "pointer", "7", "eh1_x", "steps", "--socket", "/nonexistent"],
-            input='[{"type":"jump","x":0,"y":0}]', capture_output=True, text=True, timeout=5)
-        self.assertEqual(bad.returncode, 2)
-        self.assertIn("type move|down|up", bad.stderr)
-        result, _, payload = self._input_command(
-            "pointer", "7", "eh1_x", "steps",
-            stdin='[{"type":"move","x":1,"y":2},{"type":"down","x":1,"y":2,"delay_ms":5},'
-                  '{"type":"up","x":3,"y":2}]')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(payload["steps"]), 3)
+    def test_pointer_rejects_bad_input_before_ipc(self) -> None:
+        for args, stdin, needle in (
+            (["ph1_0123456789abcdef0123456789abcdef", "steps"], '[{"type":"jump","x":0,"y":0}]', "type move|down|up"),
+            (["eh1_not-a-region-handle", "click", "--at", "1,1"], None, "handle is malformed"),
+            (["ph1_0123456789abcdef0123456789abcdef", "click"], None, "click needs --at"),
+            (["ph1_0123456789abcdef0123456789abcdef", "click", "--at", "-4,2"], None, "non-negative"),
+        ):
+            bad = subprocess.run([str(CLI), "pointer", "7", *args, "--socket", "/nonexistent"],
+                                 input=stdin, capture_output=True, text=True, timeout=5)
+            self.assertEqual(bad.returncode, 2, args)
+            self.assertIn(needle, bad.stderr)
 
     def test_pointer_refusal_is_nonzero_with_progress(self) -> None:
         response = (b'{"ok":false,"error":{"code":"target_obscured","message":"m"},'
                     b'"gesture":{"dispatched_steps":4,"button_released":true}}\n')
         result, _, _ = self._input_command(
-            "pointer", "7", "eh1_x", "drag", "--to", "0,200", response=response)
+            "pointer", "7", "ph1_0123456789abcdef0123456789abcdef", "drag", "--from", "10,10", "--to", "10,200", response=response)
         self.assertEqual(result.returncode, 1)
         self.assertTrue(json.loads(result.stdout)["gesture"]["button_released"])
 
     def test_key_input_text_and_named_key(self) -> None:
-        result, command, payload = self._input_command("key-input", "7", "eh1_field", stdin="W7KQ\n")
+        result, command, payload = self._input_command("key-input", "7", "ph1_0123456789abcdef0123456789abcdef", stdin="W7KQ\n")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(command[0], "key-input")
-        self.assertEqual(payload, {"version": 1, "handle": "eh1_field", "text": "W7KQ"})
-        result, _, payload = self._input_command("key-input", "7", "eh1_field", "--key", "Enter")
+        self.assertEqual(payload, {"version": 1, "handle": "ph1_0123456789abcdef0123456789abcdef", "text": "W7KQ"})
+        result, _, payload = self._input_command("key-input", "7", "ph1_0123456789abcdef0123456789abcdef", "--key", "Enter")
         self.assertEqual(payload["key"], "Enter")
-        bad = subprocess.run([str(CLI), "key-input", "7", "eh1_field", "--socket", "/nonexistent"],
+        bad = subprocess.run([str(CLI), "key-input", "7", "ph1_0123456789abcdef0123456789abcdef", "--socket", "/nonexistent"],
                              input="a\tb", capture_output=True, text=True, timeout=5)
         self.assertEqual(bad.returncode, 2)
 

@@ -282,7 +282,8 @@ after a `--frame-bound` drag's press, inside the bound frame) and a fresh
 DevTools hit test to return that same element, so covered or out-of-region
 points are refused. A refused gesture stops without retry (a held button is
 released) and reports `dispatched_steps`. In a tab that is not displayed, each
-mouse event can take about a second.
+mouse event can take about a second, so drag there with a short explicit `steps`
+list (~6 events: down, a few moves, up) rather than a long interpolated `drag`.
 
 `key-input TAB HANDLE` types printable text from stdin (one trailing newline is
 dropped) or sends `--key NAME` (Enter, Tab, Backspace, Delete, Escape, Space,
@@ -318,7 +319,8 @@ sets a lease (1..300000ms), or releases it (0). Extend it before long auth waits
 release it when done. Popups inherit the remaining lease. Blink visibility/focus
 is emulated only for leased pages; the owner's native focus and selected tab are
 unchanged. Status/tab/network/cookie metadata reads do not renew activity, and
-`tabs --json` exposes `activity_remaining_ms`. Requires the browser IPC command
+`tabs --json` exposes `activity_remaining_ms`. A background screenshot taken
+without a live lease can return a stale frame; set `activity` first. Requires the browser IPC command
 `tab-activity`; installing only this CLI cannot fix an already-running old browser.
 
 ## Validation

@@ -97,7 +97,7 @@ vimbrowser-cli inspect-controls @active --frame FRAME_ID --role button --name-ex
 vimbrowser-cli activate-control @active eh1_INSPECTED_TARGET
 vimbrowser-cli input-region @active --frame FRAME_ID --at 412,318
 vimbrowser-cli pointer @active ph1_REGION_HANDLE click --at 412,318 --hold 80
-vimbrowser-cli pointer @active ph1_REGION_HANDLE drag --from 412,318 --to 590,318 --via 500,322 --frame-bound
+vimbrowser-cli pointer @active ph1_REGION_HANDLE drag --from 412,318 --to 590,318 --via 500,322
 printf '%s' "$steps_json" | vimbrowser-cli pointer @active ph1_REGION_HANDLE steps
 printf '%s' 'W7KQ' | vimbrowser-cli key-input @active ph1_FIELD_HANDLE
 vimbrowser-cli key-input @active ph1_FIELD_HANDLE --key Enter
@@ -276,12 +276,18 @@ out-of-process iframe it can only bind to the iframe as a whole.
 `pointer TAB HANDLE click|drag|steps` sends one trusted mouse gesture at
 viewport points (`--at`, `--from`, `--to`, `--via`); `drag` interpolates the
 path at ~60 Hz over `--duration` (or exactly `--moves N`); `steps` reads the raw
-`[{"type":"move|down|up","x":..,"y":..,"delay_ms":..}]` list from stdin. Before
-every step the browser requires the point to be inside the bound element (or,
-after a `--frame-bound` drag's press, inside the bound frame) and a fresh
-DevTools hit test to return that same element, so covered or out-of-region
-points are refused. A refused gesture stops without retry (a held button is
-released) and reports `dispatched_steps`.
+`[{"type":"move|down|up","x":..,"y":..,"delay_ms":..}]` list from stdin. Mint
+the handle with `input-region --at` the press point (`--from` / `--at`). Clicks
+and the press of a drag must hit that element. After the press, a drag (and a
+`steps` list with a press) may move anywhere inside the same frame, as a slider
+knob dragged along its track needs; it is still refused over a child or other
+frame, under a cover, or outside the frame's visible box/viewport.
+`--element-bound` keeps the whole path on the element (`--frame-bound` is the
+default and still accepted). Before every step the browser checks the region and
+a fresh DevTools hit test. A refused gesture stops without retry (a held button
+is released), reports `dispatched_steps`, and the CLI adds a `hint` saying
+exactly what to change (which point to mint the handle at, which flag to drop,
+or where the path left the frame).
 
 Blink acknowledges a mouse move only with a rendered frame. While the browser
 window is off-screen (on a hidden dwm workspace X11 paces it with a 1 Hz fake

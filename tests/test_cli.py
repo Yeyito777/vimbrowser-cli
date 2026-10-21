@@ -488,6 +488,48 @@ class UploadFileTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["gesture"]["dispatched_steps"], 11)
         self.assertEqual(len(payload["steps"]), 11)
 
+    def test_pointer_drag_may_leave_its_element_by_default(self) -> None:
+        # A slider knob is pressed on the knob and released far along the track.
+        handle = "ph1_0123456789abcdef0123456789abcdef"
+        result, _, payload = self._input_command(
+            "pointer", "7", handle, "drag", "--from", "1033,765", "--to", "1160,765")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["bound"], "frame")
+        _, _, payload = self._input_command(
+            "pointer", "7", handle, "drag", "--from", "1033,765", "--to", "1040,765", "--element-bound")
+        self.assertEqual(payload["bound"], "element")
+        _, _, payload = self._input_command("pointer", "7", handle, "click", "--at", "5,5")
+        self.assertEqual(payload["bound"], "element")
+        press = '[{"type":"down","x":1,"y":1},{"type":"move","x":90,"y":1},{"type":"up","x":90,"y":1}]'
+        _, _, payload = self._input_command("pointer", "7", handle, "steps", stdin=press)
+        self.assertEqual(payload["bound"], "frame")
+        _, _, payload = self._input_command("pointer", "7", handle, "steps",
+                                            stdin='[{"type":"move","x":1,"y":1}]')
+        self.assertEqual(payload["bound"], "element")
+        both = subprocess.run([str(CLI), "pointer", "7", handle, "drag", "--from", "1,1", "--to", "9,9",
+                               "--frame-bound", "--element-bound", "--socket", "/nonexistent"],
+                              capture_output=True, text=True, timeout=5)
+        self.assertEqual(both.returncode, 2)
+
+    def test_pointer_refusals_say_what_to_change(self) -> None:
+        handle = "ph1_0123456789abcdef0123456789abcdef"
+        drag = ("pointer", "7", handle, "drag", "--from", "10,10", "--to", "300,10")
+
+        def refused(code: str, sent: int, *extra: str) -> str:
+            response = ('{"ok":false,"error":{"code":"%s","message":"m"},'
+                        '"gesture":{"dispatched_steps":%d,"button_released":true}}\n' % (code, sent))
+            result, _, _ = self._input_command(*drag, *extra, response=response.encode())
+            self.assertEqual(result.returncode, 1)
+            return json.loads(result.stdout)["hint"]
+
+        self.assertIn("--at the same X,Y as --from", refused("outside_region", 0))
+        self.assertIn("drop --element-bound", refused("outside_region", 5, "--element-bound"))
+        self.assertIn("inside that frame and on screen", refused("outside_region", 5))
+        self.assertIn("inside the same frame", refused("target_obscured", 5))
+        self.assertIn("--at the same X,Y as --from", refused("target_obscured", 1))
+        self.assertIn("inside the same frame", refused("target_obscured", 2))
+        self.assertIn("mint a new one", refused("expired_handle", 0))
+
     def test_pointer_rejects_bad_input_before_ipc(self) -> None:
         for args, stdin, needle in (
             (["ph1_0123456789abcdef0123456789abcdef", "steps"], '[{"type":"jump","x":0,"y":0}]', "type move|down|up"),

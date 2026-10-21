@@ -1007,12 +1007,48 @@ def _gesture_timeout(steps: list[dict], scheduled: bool) -> float:
     return sum(step.get("delay_ms", 0) for step in steps) / 1000 + POINTER_EVENT_WORST_S * acked + 5
 
 
+def _pointer_hint(reply: dict, payload: dict) -> str | None:
+    """Say exactly what to change after a region refusal."""
+    code = (reply.get("error") or {}).get("code")
+    sent = (reply.get("gesture") or {}).get("dispatched_steps", 0)
+    steps = payload.get("steps") or []
+    down = next((i for i, step in enumerate(steps) if step["type"] == "down"), len(steps))
+    pressing = sent <= down
+    element = payload.get("bound") != "frame"
+    if code == "outside_region" and (pressing or element):
+        if pressing:
+            return ("the press point is not on the element this handle was minted on: mint the "
+                    "handle with input-region --at the same X,Y as --from (or --at for click)")
+        return ("the path left the element and this gesture was element-bound: drop "
+                "--element-bound so the drag may move anywhere in the same frame")
+    if code == "outside_region":
+        return ("the path left the bound frame's visible box (frame edge or viewport): keep "
+                "--to/--via inside that frame and on screen, scrolling first if needed")
+    if code == "target_obscured" and not pressing and not element:
+        return ("a point of the path is over a child frame, another frame, or something covering "
+                "the page: route --to/--via around it inside the same frame")
+    if code == "target_obscured" and pressing:
+        return ("the press point does not hit the element this handle was minted on (minted "
+                "elsewhere, or something now covers it): mint the handle with input-region "
+                "--at the same X,Y as --from (or --at for click), right before the gesture")
+    if code == "target_obscured":
+        return ("something covers the element at a point (or it moved): take a fresh "
+                "frame-tree/screenshot and mint a new handle on what is on top")
+    if code in {"invalid_handle", "expired_handle", "target_moved", "stale_frame"}:
+        return "handles are one-shot and live 15 s: mint a new one with input-region right before use"
+    return None
+
+
 def _send_input(args, command: str, payload: dict) -> None:
     token = base64.b64encode(
         json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     ).decode("ascii")
     reply = _json_response(args, f"{command} {_resolve_tab(args, args.tab)} {token}",
                            label=command)
+    if command == "pointer-gesture" and reply.get("ok") is not True:
+        hint = _pointer_hint(reply, payload)
+        if hint:
+            reply["hint"] = hint
     _print_json(reply, pretty=args.pretty)
     if reply.get("ok") is not True:
         raise SystemExit(1)
@@ -1052,12 +1088,13 @@ def cmd_pointer(argv: list[str]) -> None:
             "(or frame) of one input-region handle"
         ),
         epilog=(
-            "Points are CSS px of the tab's main viewport. The browser consumes HANDLE "
-            "once and, before every step, requires the point to lie in the bound "
-            "element's box and DevTools hit testing to return that same element. A "
-            "drag's press is element-bound; with --frame-bound the rest of the path may "
-            "move anywhere inside the same frame. A refused gesture is never retried "
-            "and a held button is released."
+            "Points are CSS px of the tab's main viewport. Mint HANDLE with input-region "
+            "at the press point (--from / --at). The browser consumes it once. Clicks and "
+            "the press of a drag must hit that element. After the press a drag may move "
+            "anywhere inside the same frame (e.g. a slider knob dragged along its track), "
+            "but never into another frame, under a cover, or off screen; --element-bound "
+            "keeps the whole path on the element. A refused gesture is never retried, a "
+            "held button is released, and the reply carries a hint saying what to change."
         ),
     )
     p.add_argument("tab", help="Stable tab ID, @active, @first, or @last")
@@ -1075,8 +1112,12 @@ def cmd_pointer(argv: list[str]) -> None:
     p.add_argument("--moves", type=int,
                    help="drag: number of interpolated moves (default ~60 Hz over --duration, "
                         f"at most {POINTER_LEGACY_MOVES} on browsers whose moves wait for a frame)")
-    p.add_argument("--frame-bound", action="store_true",
-                   help="drag/steps: after the press, allow the path anywhere in the frame")
+    bound = p.add_mutually_exclusive_group()
+    bound.add_argument("--frame-bound", action="store_true",
+                       help="after the press, allow the path anywhere in the handle's frame "
+                            "(default for drag and for steps with a press)")
+    bound.add_argument("--element-bound", action="store_true",
+                       help="keep every point of a drag/steps on the handle's element")
     p.add_argument("--pretty", action="store_true", help="Pretty-print response JSON")
     args, extras = p.parse_known_args(argv)
     handle = _region_handle(p, args.handle)
@@ -1112,8 +1153,12 @@ def cmd_pointer(argv: list[str]) -> None:
     if args.action == "steps":
         scheduled = _pointer_moves_scheduled(args)
     args.timeout = max(args.timeout, _gesture_timeout(steps, scheduled))
+    # The browser requires a press for a frame bound; the press itself always
+    # stays element-bound.
+    pressed = any(step["type"] == "down" for step in steps)
+    frame = args.action != "click" and pressed and not args.element_bound
     _send_input(args, "pointer-gesture", {
-        "version": 1, "handle": handle, "bound": "frame" if args.frame_bound else "element",
+        "version": 1, "handle": handle, "bound": "frame" if frame else "element",
         "steps": steps})
 
 

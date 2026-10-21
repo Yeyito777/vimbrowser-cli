@@ -275,15 +275,23 @@ out-of-process iframe it can only bind to the iframe as a whole.
 
 `pointer TAB HANDLE click|drag|steps` sends one trusted mouse gesture at
 viewport points (`--at`, `--from`, `--to`, `--via`); `drag` interpolates the
-path at ~60 Hz over `--duration`; `steps` reads the raw
+path at ~60 Hz over `--duration` (or exactly `--moves N`); `steps` reads the raw
 `[{"type":"move|down|up","x":..,"y":..,"delay_ms":..}]` list from stdin. Before
 every step the browser requires the point to be inside the bound element (or,
 after a `--frame-bound` drag's press, inside the bound frame) and a fresh
 DevTools hit test to return that same element, so covered or out-of-region
 points are refused. A refused gesture stops without retry (a held button is
-released) and reports `dispatched_steps`. In a tab that is not displayed, each
-mouse event can take about a second, so drag there with a short explicit `steps`
-list (~6 events: down, a few moves, up) rather than a long interpolated `drag`.
+released) and reports `dispatched_steps`.
+
+Blink acknowledges a mouse move only with a rendered frame. While the browser
+window is off-screen (on a hidden dwm workspace X11 paces it with a 1 Hz fake
+vblank) leased background tabs render about once a second. Browsers whose
+`version` reply lists the `pointer-scheduled-moves` feature send moves on their
+own schedule, so drags take their planned time anyway. On older builds every
+move waits ~1 s, so `drag` then interpolates at most 8 moves. Either way the CLI
+waits as long as the gesture can legitimately take (delays plus ~1.25 s per
+acknowledged event) instead of disconnecting mid-gesture; `--timeout` only
+raises that.
 
 `key-input TAB HANDLE` types printable text from stdin (one trailing newline is
 dropped) or sends `--key NAME` (Enter, Tab, Backspace, Delete, Escape, Space,
@@ -319,8 +327,12 @@ sets a lease (1..300000ms), or releases it (0). Extend it before long auth waits
 release it when done. Popups inherit the remaining lease. Blink visibility/focus
 is emulated only for leased pages; the owner's native focus and selected tab are
 unchanged. Status/tab/network/cookie metadata reads do not renew activity, and
-`tabs --json` exposes `activity_remaining_ms`. A background screenshot taken
-without a live lease can return a stale frame; set `activity` first. Requires the browser IPC command
+`tabs --json` exposes `activity_remaining_ms`. `screenshot` is page-directed
+too: it leases the tab and captures a freshly rendered frame of the current
+page. Animations, transitions and image swaps still advance at the tab's frame
+rate (about 1 Hz while the browser window is off-screen), so after a click that
+loads or animates something, wait a second or two before the screenshot.
+Requires the browser IPC command
 `tab-activity`; installing only this CLI cannot fix an already-running old browser.
 
 ## Validation

@@ -911,6 +911,13 @@ POINTER_MAX_STEPS = 256
 POINTER_MAX_DELAY_MS = 5000
 POINTER_MAX_TOTAL_MS = 15000
 POINTER_FRAME_MS = 16
+# Blink acknowledges a mouse move only with a rendered frame, and a browser
+# window that is off-screen (a hidden dwm workspace) renders at 1 Hz. Browsers
+# advertising this feature keep each move's own schedule; older ones wait for
+# every ack, so drags there use few moves and the IPC wait covers ~1 s/event.
+POINTER_SCHEDULED_FEATURE = "pointer-scheduled-moves"
+POINTER_LEGACY_MOVES = 8
+POINTER_EVENT_WORST_S = 1.25
 KEY_NAMES = ("Enter", "Tab", "Backspace", "Delete", "Escape", "Space", "ArrowLeft",
              "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End")
 
@@ -943,13 +950,14 @@ def _click_steps(at: tuple[float, float], hold_ms: int) -> list[dict]:
     return [_step("move", at), _step("down", at, 20), _step("up", at, hold_ms)]
 
 
-def _drag_steps(points: list[tuple[float, float]], duration_ms: int) -> list[dict]:
-    """Press at points[0], move through the polyline in ~60 Hz steps over
-    duration_ms, release at points[-1]."""
+def _drag_steps(points: list[tuple[float, float]], duration_ms: int,
+                moves: int | None = None) -> list[dict]:
+    """Press at points[0], move through the polyline in `moves` evenly timed
+    steps (default ~60 Hz) over duration_ms, release at points[-1]."""
     segments = list(zip(points, points[1:]))
     lengths = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5 for a, b in segments]
     total = sum(lengths) or 1.0
-    count = max(2, min(POINTER_MAX_STEPS - 4, round(duration_ms / POINTER_FRAME_MS)))
+    count = moves or max(2, min(POINTER_MAX_STEPS - 4, round(duration_ms / POINTER_FRAME_MS)))
     delay = max(1, round(duration_ms / count))
     steps = [_step("move", points[0]), _step("down", points[0], 30)]
     for i in range(1, count + 1):
@@ -978,6 +986,25 @@ def _validate_steps(p: argparse.ArgumentParser, steps) -> None:
         total += delay
     if total > POINTER_MAX_TOTAL_MS:
         p.error(f"a gesture may last at most {POINTER_MAX_TOTAL_MS} ms")
+
+
+def _pointer_moves_scheduled(args) -> bool:
+    """True when the browser sends drag moves without waiting for each frame."""
+    try:
+        reply = json.loads(ipc.send("version", socket_override=args.socket,
+                                    profile_dir=args.profile_dir,
+                                    timeout=min(args.timeout, 5.0)))
+    except (ipc.IpcError, ValueError):
+        return False
+    return isinstance(reply, dict) and POINTER_SCHEDULED_FEATURE in (reply.get("features") or [])
+
+
+def _gesture_timeout(steps: list[dict], scheduled: bool) -> float:
+    """Seconds the browser may legitimately take: the steps' delays plus up to
+    ~1 s per acknowledged event in a window that renders once a second.
+    Disconnecting earlier would not stop the gesture, only hide its result."""
+    acked = sum(1 for step in steps if not scheduled or step["type"] != "move") + (2 if scheduled else 0)
+    return sum(step.get("delay_ms", 0) for step in steps) / 1000 + POINTER_EVENT_WORST_S * acked + 5
 
 
 def _send_input(args, command: str, payload: dict) -> None:
@@ -1045,11 +1072,15 @@ def cmd_pointer(argv: list[str]) -> None:
                    help="drag: intermediate X,Y waypoint (repeatable)")
     p.add_argument("--duration", type=int, default=600,
                    help="drag: total movement time in ms (default 600)")
+    p.add_argument("--moves", type=int,
+                   help="drag: number of interpolated moves (default ~60 Hz over --duration, "
+                        f"at most {POINTER_LEGACY_MOVES} on browsers whose moves wait for a frame)")
     p.add_argument("--frame-bound", action="store_true",
                    help="drag/steps: after the press, allow the path anywhere in the frame")
     p.add_argument("--pretty", action="store_true", help="Pretty-print response JSON")
     args, extras = p.parse_known_args(argv)
     handle = _region_handle(p, args.handle)
+    scheduled = False
     if args.action == "steps":
         _reject_inline_payload(p, extras, "pointer steps JSON")
         try:
@@ -1070,8 +1101,17 @@ def cmd_pointer(argv: list[str]) -> None:
                 p.error("drag needs --from X,Y and --to X,Y")
             if not 50 <= args.duration <= 10000:
                 p.error("--duration must be 50 to 10000 ms")
-            steps = _drag_steps([args.start, *args.via, args.to], args.duration)
+            if args.moves is not None and not 2 <= args.moves <= POINTER_MAX_STEPS - 4:
+                p.error(f"--moves must be 2 to {POINTER_MAX_STEPS - 4}")
+            scheduled = _pointer_moves_scheduled(args)
+            moves = args.moves
+            if moves is None and not scheduled:
+                moves = max(2, min(POINTER_LEGACY_MOVES, round(args.duration / POINTER_FRAME_MS)))
+            steps = _drag_steps([args.start, *args.via, args.to], args.duration, moves)
     _validate_steps(p, steps)
+    if args.action == "steps":
+        scheduled = _pointer_moves_scheduled(args)
+    args.timeout = max(args.timeout, _gesture_timeout(steps, scheduled))
     _send_input(args, "pointer-gesture", {
         "version": 1, "handle": handle, "bound": "frame" if args.frame_bound else "element",
         "steps": steps})

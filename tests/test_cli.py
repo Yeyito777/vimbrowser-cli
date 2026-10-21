@@ -55,6 +55,48 @@ class OneShotServer:
             self.error = exc
 
 
+class ScriptedServer:
+    """Fake vimbrowser-ipc/1 server answering several connections by command name."""
+
+    def __init__(self, directory: Path, replies: dict[str, bytes], delay: float = 0.0) -> None:
+        self.path = directory / "ipc.sock"
+        self.replies = replies
+        self.delay = delay
+        self.commands: list[str] = []
+        self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._listener.bind(str(self.path))
+        self._listener.listen(4)
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    def __enter__(self) -> ScriptedServer:
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self._listener.close()
+        self._thread.join(timeout=1)
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                connection, _ = self._listener.accept()
+            except OSError:
+                return
+            with connection:
+                command = b""
+                while not command.endswith(b"\n"):
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        break
+                    command += chunk
+                text = command.decode("utf-8").strip()
+                self.commands.append(text)
+                name = text.split(" ", 1)[0]
+                if name != "version":
+                    time.sleep(self.delay)
+                connection.sendall(self.replies.get(name, b"ERR unknown command\n"))
+
+
 class CliExitTests(unittest.TestCase):
     def test_activity_exact_tab_lease_and_release(self) -> None:
         for duration in (0, 60000, 300000):
@@ -360,14 +402,20 @@ class UploadFileTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("handle is malformed", result.stderr)
 
+    SCHEDULED = b'{"protocol":"vimbrowser-ipc","version":1,"features":["pointer-scheduled-moves"]}\n'
+    LEGACY = b'{"protocol":"vimbrowser-ipc","version":1}\n'
+
     def _input_command(self, *args: str, stdin: str | None = None,
-                       response: bytes = b'{"ok":true,"tabid":7}\n'):
+                       response: bytes = b'{"ok":true,"tabid":7}\n',
+                       version: bytes = SCHEDULED, delay: float = 0.0):
         with tempfile.TemporaryDirectory(prefix="vimbrowser-cli-input-") as tmp:
-            with OneShotServer(Path(tmp), response) as server:
+            name = args[0] if args[0] != "pointer" else "pointer-gesture"
+            with ScriptedServer(Path(tmp), {"version": version, name: response}, delay) as server:
                 result = subprocess.run(
                     [str(CLI), *args, "--socket", str(server.path), "--timeout", "1"],
-                    input=stdin, capture_output=True, text=True, timeout=5, check=False)
-        command = server.command.decode("utf-8").strip().split(" ")
+                    input=stdin, capture_output=True, text=True, timeout=30, check=False)
+        sent = [c for c in server.commands if not c.startswith("version")]
+        command = sent[-1].split(" ") if sent else []
         payload = json.loads(base64.b64decode(command[2])) if len(command) == 3 else None
         return result, command, payload
 
@@ -402,6 +450,43 @@ class UploadFileTests(unittest.TestCase):
         self.assertEqual((steps[-1]["x"], steps[-1]["y"]), (260.0, 50.0))
         self.assertGreaterEqual(len(steps), 30)
         self.assertTrue(all(s["type"] == "move" for s in steps[2:-1]))
+
+    def test_pointer_drag_uses_few_moves_when_the_browser_waits_for_frames(self) -> None:
+        # Older browsers ack each move only with a rendered frame (~1 s in an
+        # off-screen window), so a 60 Hz path would outlast every timeout.
+        for version in (self.LEGACY, b"ERR unknown command\n"):
+            result, _, payload = self._input_command(
+                "pointer", "7", "ph1_0123456789abcdef0123456789abcdef", "drag",
+                "--from", "100,50", "--to", "260,50", "--frame-bound", version=version)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            steps = payload["steps"]
+            self.assertEqual([s["type"] for s in steps], ["move", "down"] + ["move"] * 8 + ["up"])
+            self.assertEqual((steps[-2]["x"], steps[-1]["x"]), (260.0, 260.0))
+            self.assertAlmostEqual(sum(s["delay_ms"] for s in steps[2:-1]), 600, delta=8)
+
+    def test_pointer_drag_moves_can_be_set_exactly(self) -> None:
+        for version in (self.LEGACY, self.SCHEDULED):
+            result, _, payload = self._input_command(
+                "pointer", "7", "ph1_0123456789abcdef0123456789abcdef", "drag",
+                "--from", "100,50", "--to", "260,50", "--moves", "20", "--duration", "160",
+                version=version)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(payload["steps"]), 23)
+        bad = subprocess.run([str(CLI), "pointer", "7", "ph1_0123456789abcdef0123456789abcdef", "drag",
+                              "--from", "1,1", "--to", "9,9", "--moves", "1", "--socket", "/nonexistent"],
+                             capture_output=True, text=True, timeout=5)
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn("--moves must be", bad.stderr)
+
+    def test_pointer_waits_for_the_gesture_beyond_the_default_timeout(self) -> None:
+        # Disconnecting mid-gesture would not stop it, only hide the result.
+        response = b'{"ok":true,"tabid":7,"gesture":{"dispatched_steps":11,"trusted":true}}\n'
+        result, _, payload = self._input_command(
+            "pointer", "7", "ph1_0123456789abcdef0123456789abcdef", "drag",
+            "--from", "100,50", "--to", "260,50", response=response, version=self.LEGACY, delay=1.6)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["gesture"]["dispatched_steps"], 11)
+        self.assertEqual(len(payload["steps"]), 11)
 
     def test_pointer_rejects_bad_input_before_ipc(self) -> None:
         for args, stdin, needle in (
